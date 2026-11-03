@@ -1,0 +1,16 @@
+23:47:28 [registry] listening for advertisements on UDP 5000
+23:47:28 [registry] listening for discovery queries on UDP 5001
+23:47:29 [registry] REGISTERED   srv1 (chat) at 10.0.0.1:7000  ttl=15s
+23:47:29 [registry] TABLE (1): srv1/chat@10.0.0.1:7000
+23:47:29 [registry] REGISTERED   srv2 (chat) at 10.0.0.2:7000  ttl=15s
+23:47:29 [registry] TABLE (2): srv1/chat@10.0.0.1:7000, srv2/chat@10.0.0.2:7000
+23:47:29 [registry] REGISTERED   srv3 (files) at 10.0.0.3:7000  ttl=15s
+23:47:29 [registry] TABLE (3): srv1/chat@10.0.0.1:7000, srv2/chat@10.0.0.2:7000, srv3/files@10.0.0.3:7000
+23:47:37 [registry] QUERY        10.0.0.11 asked for '*' -> 3 result(s)
+23:47:37 [registry] QUERY        10.0.0.11 asked for 'chat' -> 2 result(s)
+23:47:37 [registry] QUERY        10.0.0.11 asked for 'files' -> 1 result(s)
+23:47:37 [registry] QUERY        10.0.0.11 asked for 'printer' -> 0 result(s)
+23:47:37 [registry] QUERY        10.0.0.12 asked for 'files' -> 1 result(s)
+23:47:54 [registry] EXPIRED      srv1 (chat) at 10.0.0.1:7000  (no advert for >15s) -> server DOWN
+23:47:54 [registry] TABLE (2): srv2/chat@10.0.0.2:7000, srv3/files@10.0.0.3:7000
+23:48:03 [registry] QUERY        10.0.0.11 asked for 'chat' -> 1 result(s)

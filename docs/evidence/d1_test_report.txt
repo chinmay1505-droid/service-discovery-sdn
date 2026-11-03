@@ -1,0 +1,51 @@
+D1 test report  (2026-10-29 23:48:07)
+
+T1  PASS  Host connectivity via SDN switch (pingAll) -- packet loss 0%
+T2  PASS  Registry holds all advertised servers -- found ['srv1', 'srv2', 'srv3']
+T3  PASS  Discover 'chat' -> srv1 + srv2 -- found ['srv1', 'srv2'], latency 0.47 ms
+T4  PASS  Discover 'files' -> srv3 -- found ['srv3'], latency 0.41 ms
+T5  PASS  Discover unknown service -> empty list -- count=0
+T6  PASS  End-to-end: discover then use service (c2 -> srv3) -- reply='srv3[files] says: hello-from-c2'
+T7  PASS  Controller installed ALLOW flows for advertised servers -- 3 allow-flows seen
+T8  PASS  Un-advertised server is BLOCKED by SDN (ping ok, udp/7000 dropped) -- ping ok, udp reply=None
+T9  PASS  Crashed server expires from registry AND traffic to it is blocked -- chat now ['srv2'], allow-flow removed=True, traffic blocked=True
+
+9 / 9 passed
+
+Flow table at end of run:
+OFPST_FLOW reply (OF1.3) (xid=0x2):
+ cookie=0x0, duration=38.278s, table=0, n_packets=0, n_bytes=0, priority=300,udp,nw_dst=10.0.0.2,tp_dst=7000 actions=output:3
+ cookie=0x0, duration=38.274s, table=0, n_packets=1, n_bytes=55, priority=300,udp,nw_dst=10.0.0.3,tp_dst=7000 actions=output:4
+ cookie=0x0, duration=44.515s, table=0, n_packets=19, n_bytes=2212, priority=250,udp,tp_dst=5000 actions=CONTROLLER:65535
+ cookie=0x0, duration=44.515s, table=0, n_packets=4, n_bytes=174, priority=200,udp,tp_dst=7000 actions=drop
+ cookie=0x0, duration=39.434s, table=0, n_packets=5, n_bytes=434, priority=1,in_port=6,dl_dst=02:e0:8f:16:92:0b actions=output:5
+ cookie=0x0, duration=39.433s, table=0, n_packets=5, n_bytes=434, priority=1,in_port=5,dl_dst=e6:71:1b:c9:ef:7e actions=output:6
+ cookie=0x0, duration=39.430s, table=0, n_packets=8, n_bytes=1330, priority=1,in_port=1,dl_dst=02:e0:8f:16:92:0b actions=output:5
+ cookie=0x0, duration=39.429s, table=0, n_packets=7, n_bytes=631, priority=1,in_port=5,dl_dst=ae:28:d5:73:b2:d0 actions=output:1
+ cookie=0x0, duration=39.425s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=2,dl_dst=02:e0:8f:16:92:0b actions=output:5
+ cookie=0x0, duration=39.424s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=5,dl_dst=06:20:16:1c:ac:66 actions=output:2
+ cookie=0x0, duration=39.421s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=3,dl_dst=02:e0:8f:16:92:0b actions=output:5
+ cookie=0x0, duration=39.420s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=5,dl_dst=06:2f:c7:05:3d:c1 actions=output:3
+ cookie=0x0, duration=39.416s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=4,dl_dst=02:e0:8f:16:92:0b actions=output:5
+ cookie=0x0, duration=39.415s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=5,dl_dst=ba:8f:1a:38:96:cb actions=output:4
+ cookie=0x0, duration=39.408s, table=0, n_packets=4, n_bytes=429, priority=1,in_port=1,dl_dst=e6:71:1b:c9:ef:7e actions=output:6
+ cookie=0x0, duration=39.407s, table=0, n_packets=3, n_bytes=239, priority=1,in_port=6,dl_dst=ae:28:d5:73:b2:d0 actions=output:1
+ cookie=0x0, duration=39.403s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=2,dl_dst=e6:71:1b:c9:ef:7e actions=output:6
+ cookie=0x0, duration=39.402s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=6,dl_dst=06:20:16:1c:ac:66 actions=output:2
+ cookie=0x0, duration=39.398s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=3,dl_dst=e6:71:1b:c9:ef:7e actions=output:6
+ cookie=0x0, duration=39.397s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=6,dl_dst=06:2f:c7:05:3d:c1 actions=output:3
+ cookie=0x0, duration=39.392s, table=0, n_packets=4, n_bytes=311, priority=1,in_port=4,dl_dst=e6:71:1b:c9:ef:7e actions=output:6
+ cookie=0x0, duration=39.392s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=6,dl_dst=ba:8f:1a:38:96:cb actions=output:4
+ cookie=0x0, duration=39.384s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=2,dl_dst=ae:28:d5:73:b2:d0 actions=output:1
+ cookie=0x0, duration=39.383s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=1,dl_dst=06:20:16:1c:ac:66 actions=output:2
+ cookie=0x0, duration=39.380s, table=0, n_packets=4, n_bytes=280, priority=1,in_port=3,dl_dst=ae:28:d5:73:b2:d0 actions=output:1
+ cookie=0x0, duration=39.380s, table=0, n_packets=3, n_bytes=182, priority=1,in_port=1,dl_dst=06:2f:c7:05:3d:c1 actions=output:3
+ cookie=0x0, duration=39.376s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=4,dl_dst=ae:28:d5:73:b2:d0 actions=output:1
+ cookie=0x0, duration=39.375s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=1,dl_dst=ba:8f:1a:38:96:cb actions=output:4
+ cookie=0x0, duration=39.366s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=3,dl_dst=06:20:16:1c:ac:66 actions=output:2
+ cookie=0x0, duration=39.365s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=2,dl_dst=06:2f:c7:05:3d:c1 actions=output:3
+ cookie=0x0, duration=39.362s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=4,dl_dst=06:20:16:1c:ac:66 actions=output:2
+ cookie=0x0, duration=39.362s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=2,dl_dst=ba:8f:1a:38:96:cb actions=output:4
+ cookie=0x0, duration=39.350s, table=0, n_packets=3, n_bytes=238, priority=1,in_port=4,dl_dst=06:2f:c7:05:3d:c1 actions=output:3
+ cookie=0x0, duration=39.349s, table=0, n_packets=2, n_bytes=140, priority=1,in_port=3,dl_dst=ba:8f:1a:38:96:cb actions=output:4
+ cookie=0x0, duration=44.515s, table=0, n_packets=44, n_bytes=2632, priority=0 actions=CONTROLLER:65535

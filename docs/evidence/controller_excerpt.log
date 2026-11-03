@@ -1,0 +1,5 @@
+[SDN] switch 0000000000000001 connected: installed table-miss, advert-snoop (udp/5000) and default-deny (udp/7000) rules
+[SDN] ADVERT from srv1 (chat@10.0.0.1:7000) -> installed ALLOW flow (udp to 10.0.0.1:7000 -> switch port 2)
+[SDN] ADVERT from srv2 (chat@10.0.0.2:7000) -> installed ALLOW flow (udp to 10.0.0.2:7000 -> switch port 3)
+[SDN] ADVERT from srv3 (files@10.0.0.3:7000) -> installed ALLOW flow (udp to 10.0.0.3:7000 -> switch port 4)
+[SDN] srv1 (10.0.0.1:7000) silent for >15s -> removed ALLOW flow, traffic now BLOCKED
