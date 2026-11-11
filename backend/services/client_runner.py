@@ -86,6 +86,7 @@ def run_discover(registry_ip: str, service: str,
                     "servers": [
                         f"{s['name']}@{s['ip']}:{s['port']}" for s in servers
                     ],
+                    "server_details": servers,
                     "latency_ms": round(latency_ms, 2),
                     "attempts": attempt,
                 })
