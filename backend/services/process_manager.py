@@ -4,6 +4,7 @@ Enables starting, stopping, crashing, and inspecting service server processes
 both in standalone mode and for robustness testing.
 """
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -53,6 +54,8 @@ def start_server(
     no_advertise: bool = False,
 ) -> dict:
     """Start a service server subprocess."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name or ""):
+        return {"ok": False, "error": "Server name must be 1-64 letters, digits, '_' or '-' and start with a letter or digit"}
     os.makedirs(_LOGS, exist_ok=True)
     logfile = os.path.join(_LOGS, f"{name}.log")
 

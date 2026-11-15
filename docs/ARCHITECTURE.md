@@ -5,8 +5,8 @@ In modern dynamic networks and microservice environments, clients should not req
 1. **Servers announce themselves autonomously** by sending periodic UDP advertisements.
 2. A **registry** maintains the active directory of live services, tracking heartbeat TTLs.
 3. **Clients perform on-demand discovery** via lightweight UDP query-reply messages with client-side retransmission and latency measurement.
-4. An **SDN Controller (OS-Ken on OpenFlow 1.3 / Open vSwitch)** controls data-plane access: by default, all service traffic is dropped (`Zero Trust`). When a server advertises, the controller dynamically installs a line-rate `ALLOW` flow. If a server crashes or goes silent, the flow rule is revoked and traffic is immediately blocked again.
-5. A **real-time Web GUI & REST API** visualizes and controls the entire pipeline without replacing or mocking the underlying socket and SDN operations.
+4. An **SDN Controller (OS-Ken on OpenFlow 1.3 / Open vSwitch)** applies data-plane rules. The controller accepts unauthenticated UDP advertisements; an advertisement can trigger a line-rate `ALLOW` flow but does not authenticate the server. If a server crashes or goes silent, the flow rule is intended to be revoked. Verify installation/removal against live OVS state during a demonstration.
+5. The Web GUI and REST API follow the selected runtime: standalone uses **GUI → host backend → host registry/services**. In Mininet mode, the GUI/backend is **not bridged into Mininet namespaces**; the Mininet/OVS demonstration is performed through the Mininet CLI path.
 
 ---
 
@@ -64,7 +64,7 @@ In modern dynamic networks and microservice environments, clients should not req
 
 ## 3. Communication Flow & Sequence
 
-The following sequence describes the intended full Mininet/OVS runtime. Verify FlowMods with live `ovs-ofctl` output during a demonstration; standalone registry events do not prove that a switch flow was installed.
+The following sequence illustrates the intended Mininet/OVS network interactions; it does not mean the host GUI/backend is connected to Mininet namespaces. Perform the Mininet/OVS demonstration through the Mininet CLI path. Verify FlowMods with live `ovs-ofctl` output; standalone registry events do not prove that a switch flow was installed.
 
 ```mermaid
 sequenceDiagram
@@ -109,7 +109,7 @@ sequenceDiagram
     Note over SW: Priority 200 DEFAULT DENY matches!
     SW--xClient: PACKET DROPPED (Silent Drop)
     Client->>API: Timeout after retries
-    API->>GUI: HTTP/WS: Service Unavailable (Zero Trust Enforced)
+    API->>GUI: HTTP/WS: Service Unavailable (default-deny flow matched)
 ```
 
 ---
@@ -119,13 +119,13 @@ sequenceDiagram
 The data plane on switch `sw1` uses a strict 5-tier priority hierarchy:
 
 ```text
-Priority 300: ALLOW VALID SERVICE
+Priority 300: ALLOW ADVERTISED SERVICE (advertisement is unauthenticated)
        │     (Match: udp, nw_dst=<server_ip>, tp_dst=7000 -> Action: output:port)
        ▼
 Priority 250: ADVERTISEMENT SNOOPING
        │     (Match: udp, tp_dst=5000 -> Action: CONTROLLER:65535)
        ▼
-Priority 200: DEFAULT DENY (Zero Trust Baseline)
+Priority 200: DEFAULT DENY (UDP service traffic without a higher-priority allow flow)
        │     (Match: udp, tp_dst=7000 -> Action: drop)
        ▼
 Priority 1:   NORMAL L2 FORWARDING
@@ -141,7 +141,7 @@ Priority 0:   TABLE MISS
 |---|---|---|---|---|
 | **300** | `udp, nw_dst=<ip>, tp_dst=7000` | `output:<port>` | Dynamic: on valid `ADVERTISE` | Removed on `DEREGISTER` or 15s TTL silence |
 | **250** | `udp, tp_dst=5000` | `CONTROLLER` | Static: switch connection | Permanent (Switch lifetime) |
-| **200** | `udp, tp_dst=7000` | `drop` | Static: switch connection | Permanent (Enforces Zero-Trust) |
+| **200** | `udp, tp_dst=7000` | `drop` | Static: switch connection | Permanent unless replaced by a higher-priority matching allow flow |
 | **1** | `in_port=X, eth_dst=Y` | `output:Y` | Dynamic: MAC learning | Learns unicast MAC paths; idle timeout |
 | **0** | `(any)` | `CONTROLLER` | Static: switch connection | Base OpenFlow fallback |
 
@@ -232,7 +232,7 @@ The static-versus-dynamic comparison below is qualitative. It does not claim zer
 | Dimension | Static Baseline Approach | Dynamic Socket + SDN (This Project) |
 |---|---|---|
 | **Configuration Model** | Manual static IP tables or DNS records | Fully autonomous self-registration |
-| **Data Plane Security** | Broad subnet allowance or static ACLs | Micro-segmented Zero-Trust default-deny |
+| **Data Plane Policy** | Broad subnet allowance or static ACLs | Default-deny with advertisement-triggered allow flows; advertisements are unauthenticated |
 | **Failure Convergence** | Endpoint updates are manual unless another mechanism is used | Registry TTL expiry and controller flow revocation (requires live Mininet/OVS verification) |
-| **Rogue Endpoint Handling** | Requires manually maintained authorization policy | Priority 200 default-deny policy (requires live Mininet/OVS verification) |
+| **Rogue Endpoint Handling** | Requires manually maintained policy | Priority 200 default-deny policy (requires live Mininet/OVS verification); advertisements are not authenticated |
 | **Network Reconfiguration** | Requires network operator intervention | Autonomous OpenFlow FlowMod events |

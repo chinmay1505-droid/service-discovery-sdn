@@ -3,6 +3,7 @@
 # Usage:  bash start_backend.sh [--port 8000]
 set -e
 PORT=${1:-8000}
+HOST=${SDN_BACKEND_HOST:-127.0.0.1}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/backend"
 
@@ -19,6 +20,6 @@ if ! "$PY" -c "import fastapi, uvicorn" 2>/dev/null; then
     "$PY" -m pip install -r requirements.txt
 fi
 
-echo "Starting Service Discovery SDN backend on http://0.0.0.0:$PORT"
-exec "$PY" -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info
+echo "Starting Service Discovery SDN backend on http://$HOST:$PORT"
+exec "$PY" -m uvicorn app:app --host "$HOST" --port "$PORT" --log-level info
 

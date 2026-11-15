@@ -527,8 +527,8 @@ nav {
       <span class="stat-val"><span id="st-reg-badge" class="badge badge-online">ONLINE</span></span>
     </div>
     <div class="stat-box">
-      <span class="stat-label">SDN Controller (127.0.0.1:6653)</span>
-      <span class="stat-val"><span id="st-ctrl-badge" class="badge badge-offline">OFFLINE</span></span>
+      <span class="stat-label">Controller TCP Listener (127.0.0.1:6653)</span>
+      <span class="stat-val"><span id="st-ctrl-badge" class="badge badge-offline">UNREACHABLE</span></span>
     </div>
     <div class="stat-box">
       <span class="stat-label">Registered Servers</span>
@@ -597,8 +597,8 @@ nav {
             <span class="trace-status" id="tns-reg">IDLE</span>
           </div>
           <div class="trace-node" id="tn-sdn">
-            <span class="trace-title">4. SDN Authorization</span>
-            <span class="trace-sub">Priority 300 ALLOW</span>
+            <span class="trace-title">4. Live OpenFlow Evidence</span>
+            <span class="trace-sub">Requires live OVS flow inspection</span>
             <span class="trace-status" id="tns-sdn">IDLE</span>
           </div>
           <div class="trace-node" id="tn-server">
@@ -748,7 +748,7 @@ nav {
     <!-- Priority Hierarchy Explainer -->
     <div class="card">
       <div class="card-header">
-        <span class="card-title">OpenFlow 1.3 Flow Priority Hierarchy</span>
+        <span class="card-title">OpenFlow 1.3 Policy Hierarchy (live state is shown in the flow table)</span>
       </div>
       <div class="card-body" style="padding:0;">
         <table class="data-table">
@@ -764,10 +764,10 @@ nav {
           <tbody>
             <tr>
               <td><span class="badge badge-online">300</span></td>
-              <td><strong>ALLOW VALID SERVICE</strong></td>
+              <td><strong>ALLOW ADVERTISED SERVICE</strong></td>
               <td class="mono">udp, nw_dst=&lt;server&gt;, tp_dst=7000</td>
               <td class="mono">output:port</td>
-              <td>Installed dynamically when server advertises. Grants line-rate access to authorized server.</td>
+              <td>Controller may install this flow after an unauthenticated advertisement. It does not authenticate server identity.</td>
             </tr>
             <tr>
               <td><span class="badge badge-info">250</span></td>
@@ -781,7 +781,7 @@ nav {
               <td><strong>DEFAULT DENY</strong></td>
               <td class="mono">udp, tp_dst=7000</td>
               <td class="mono">drop</td>
-              <td>Zero-Trust policy: drops all service traffic unless an explicit priority 300 rule exists.</td>
+              <td>Drops service traffic unless a higher-priority allow rule matches; advertisements are unauthenticated.</td>
             </tr>
             <tr>
               <td><span class="badge" style="background:#e2e8f0;">1</span></td>
@@ -885,7 +885,7 @@ nav {
           <div class="scenario-title">Rogue Server &amp; Default-Deny Defense</div>
           <div class="scenario-desc">
             Spawns a rogue server on UDP 7000 with <code>--no-advertise</code>.
-            Attempts to call the service; proves that SDN Priority 200 default-deny drops unauthorized traffic.
+            Attempts to call the service; checks whether the Priority 200 default-deny flow drops traffic without a matching allow flow.
           </div>
         </div>
         <button class="btn btn-dark" onclick="runRobustness('B')">EXECUTE SCENARIO B</button>
@@ -1084,6 +1084,7 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.h
 
 let activeEventFilter = 'ALL';
 let activeModalServer = null;
+let modalInspectionRequestId = 0;
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -1114,8 +1115,9 @@ async function fetchStatus() {
     regBadge.className = `badge ${d.registry?.running ? 'badge-online' : 'badge-offline'}`;
 
     const ctrlBadge = document.getElementById('st-ctrl-badge');
-    ctrlBadge.textContent = d.controller?.running ? 'ONLINE' : 'OFFLINE';
-    ctrlBadge.className = `badge ${d.controller?.running ? 'badge-online' : 'badge-offline'}`;
+    const listenerReachable = Boolean(d.controller?.tcp_listener_reachable);
+    ctrlBadge.textContent = listenerReachable ? 'TCP REACHABLE' : 'UNREACHABLE';
+    ctrlBadge.className = `badge ${listenerReachable ? 'badge-online' : 'badge-offline'}`;
 
     document.getElementById('st-servers-count').textContent = d.servers_online ?? '0';
     document.getElementById('st-events-count').textContent = d.events_count ?? '0';
@@ -1166,7 +1168,9 @@ async function performDiscovery(service, autoUse = false) {
     setTraceNode('reg', res.ok ? 'success' : 'failed', `${res.count} found (${res.latency_ms}ms)`);
     
     if (res.count > 0) {
-      setTraceNode('sdn', 'success', 'PRIO 300 ALLOW');
+      const flowEvidence = await verifyLiveAllowFlow(res.servers || []);
+      setTraceNode('sdn', flowEvidence.verified ? 'success' : '',
+        flowEvidence.verified ? 'LIVE PRIO 300 ALLOW' : flowEvidence.available ? 'UNVERIFIED' : 'FLOW UNAVAILABLE');
       if (autoUse && res.service_ok) {
         setTraceNode('server', 'success', 'ECHO RECEIVED');
         document.getElementById('service-reply-box').style.display = 'block';
@@ -1177,7 +1181,7 @@ async function performDiscovery(service, autoUse = false) {
         setTraceNode('server', '', 'READY');
       }
     } else {
-      setTraceNode('sdn', 'failed', 'NO MATCH');
+      setTraceNode('sdn', 'failed', res.ok ? 'NO DISCOVERED SERVICE' : 'REGISTRY UNAVAILABLE');
       setTraceNode('server', 'failed', '0 SERVERS');
     }
 
@@ -1241,9 +1245,9 @@ async function fetchRegistry() {
         <td><span class="badge badge-info">${esc(e.service)}</span></td>
         <td class="mono">${esc(e.ip)}</td>
         <td class="mono">${e.port}</td>
-        <td>${e.ttl}s</td>
-        <td>${e.last_seen}s ago</td>
-        <td>${e.adverts}</td>
+        <td>${e.ttl == null ? '—' : `${e.ttl}s`}</td>
+        <td>${e.last_seen == null ? (e.age == null ? '—' : `${e.age}s ago`) : `${e.last_seen}s ago`}</td>
+        <td>${e.adverts == null ? '—' : e.adverts}</td>
         <td><span class="badge badge-online">${e.status}</span></td>
         <td>
           <button class="btn btn-outline btn-sm" onclick="inspectServer('${esc(e.name)}', '${esc(e.service)}', '${esc(e.ip)}', ${e.port})">Inspect</button>
@@ -1324,12 +1328,18 @@ async function stopServerProcess(name, hard) {
 async function fetchFlows() {
   try {
     const d = await fetch(`${BASE}/api/flows`).then(r => r.json());
-    document.getElementById('flows-source').textContent = `Source: ${d.source || 'OpenFlow 1.3'}`;
-    document.getElementById('st-flows-count').textContent = d.count ?? '5';
+    document.getElementById('flows-source').textContent = d.available
+      ? `Source: ${d.source || 'OpenFlow 1.3'}`
+      : `Live flow state unavailable${d.error ? `: ${d.error}` : ''}`;
+    document.getElementById('st-flows-count').textContent = d.available ? (d.count ?? 0) : '—';
 
     const tbody = document.getElementById('flows-table-body');
+    if (!d.available) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--g500);">Live OVS flow evidence is unavailable; controller or registry state does not verify installed flows.</td></tr>';
+      return;
+    }
     if (!d.flows || d.flows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--g500);">No flows found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--g500);">No live flows found.</td></tr>';
       return;
     }
 
@@ -1345,6 +1355,27 @@ async function fetchFlows() {
       </tr>
     `).join('');
   } catch (_) {}
+}
+
+async function verifyLiveAllowFlow(servers) {
+  try {
+    const data = await fetch(`${BASE}/api/flows`).then(r => r.json());
+    if (!data.available) return { available: false, verified: false };
+    const verified = (data.flows || []).some(flow => {
+      const match = flow.match || '';
+      const actions = flow.actions || '';
+      if (flow.priority !== 300 || !/(^|[,\s])udp([,\s]|$)/i.test(match) ||
+          !/\boutput\s*:/i.test(actions) || /(^|[,\s])drop($|[,\s])/i.test(actions)) return false;
+      return servers.some(server => {
+        const ip = String(server.ip || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`(?:^|[,\\s])nw_dst=${ip}(?:[,\\s]|$)`).test(match) &&
+          new RegExp(`(?:^|[,\\s])(?:tp_dst|udp_dst)=${Number(server.port)}(?:[,\\s]|$)`).test(match);
+      });
+    });
+    return { available: true, verified };
+  } catch (_) {
+    return { available: false, verified: false };
+  }
 }
 
 // ── Topology Rendering ────────────────────────────────────────────────────────
@@ -1442,7 +1473,7 @@ function renderTopology(topo) {
       <span class="stat-label">${esc(n.type)}</span>
       <div style="font-weight:700;font-size:12px;">${esc(n.label || n.name)}</div>
       <div class="mono" style="font-size:10.5px;color:var(--g500);">${esc(n.ip || n.address || '')}</div>
-      <div><span class="badge ${n.status === 'ONLINE' || n.status === 'ACTIVE' ? 'badge-online' : 'badge-offline'}">${n.status}</span></div>
+      <div><span class="badge ${n.status === 'ONLINE' || n.status === 'ACTIVE' ? 'badge-online' : (n.status === 'TCP_LISTENER_REACHABLE' || n.status === 'UNVERIFIED' ? 'badge-info' : 'badge-offline')}">${n.status}</span></div>
     </div>
   `).join('');
 }
@@ -1557,6 +1588,7 @@ async function runTestSuite() {
 
 // ── Server Detail Modal ───────────────────────────────────────────────────────
 function inspectServer(name, service, ip, port) {
+  const requestId = ++modalInspectionRequestId;
   activeModalServer = { name, service, ip, port };
   document.getElementById('modal-server-title').textContent = `Inspect Server: ${name}`;
   document.getElementById('modal-details-grid').innerHTML = `
@@ -1565,13 +1597,24 @@ function inspectServer(name, service, ip, port) {
     <span class="detail-label">IP Address:</span><span class="detail-val">${esc(ip)}</span>
     <span class="detail-label">Service Port:</span><span class="detail-val">${port}</span>
     <span class="detail-label">Protocol:</span><span class="detail-val">UDP Datagram (Echo)</span>
-    <span class="detail-label">SDN Authorization:</span><span class="detail-val"><span class="badge badge-online">PRIORITY 300 ALLOW</span></span>
+    <span class="detail-label">Discovery:</span><span class="detail-val"><span class="badge badge-info">DISCOVERED</span></span>
+    <span class="detail-label">Live OpenFlow:</span><span class="detail-val" id="modal-flow-state"><span class="badge badge-info">CHECKING</span></span>
   `;
   document.getElementById('modal-reply-box').textContent = '';
   document.getElementById('server-modal').classList.add('active');
+  verifyLiveAllowFlow([{ ip, port }]).then(result => {
+    if (requestId !== modalInspectionRequestId || activeModalServer?.name !== name) return;
+    const state = document.getElementById('modal-flow-state');
+    if (!state) return;
+    state.innerHTML = result.verified
+      ? '<span class="badge badge-online">VERIFIED LIVE PRIORITY 300 ALLOW</span>'
+      : `<span class="badge badge-info">${result.available ? 'NOT VERIFIED' : 'LIVE FLOW UNAVAILABLE'}</span>`;
+  });
 }
 
 function closeModal() {
+  modalInspectionRequestId++;
+  activeModalServer = null;
   document.getElementById('server-modal').classList.remove('active');
 }
 

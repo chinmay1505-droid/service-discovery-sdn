@@ -4,7 +4,7 @@ Connects the web GUI to the real networking layer:
   - Low-level socket discovery and UDP communication (client_runner)
   - Live embedded registry bridge (BridgedRegistry on UDP 5000/5001)
   - Real-time thread-safe event bus with WebSocket delivery (/ws)
-  - SDN flow inspection via ovs-ofctl or controller state (/api/flows)
+  - Live SDN flow inspection via ovs-ofctl (/api/flows)
   - Mininet / network topology visualization (/api/topology)
   - Server process controls (/api/servers/start, /api/servers/stop)
   - Robustness scenario lab (/api/robustness/run)
@@ -354,7 +354,7 @@ async def api_connect(req: ConnectRequest):
 # ---- REST: SDN flows -------------------------------------------------------
 @app.get("/api/flows")
 async def api_flows():
-    """Retrieve live OpenFlow 1.3 flow table from Open vSwitch or controller state."""
+    """Retrieve live OpenFlow 1.3 flow table from Open vSwitch."""
     return flow_inspector.get_flows()
 
 
@@ -416,7 +416,7 @@ async def api_baseline():
 @app.post("/api/tests/run")
 async def api_run_tests():
     """Run automated 17-point verification suite."""
-    return test_runner.run_all_tests(registry_ip="127.0.0.1")
+    return test_runner.run_all_tests(registry_ip=_active_registry_ip())
 
 
 # ---- REST: events (non-WS fallback) ----------------------------------------
@@ -459,13 +459,15 @@ async def websocket_endpoint(ws: WebSocket):
 
 # ---- helpers ---------------------------------------------------------------
 def _probe_controller() -> dict:
-    """Check if the OS-Ken SDN controller is reachable on 127.0.0.1:6653."""
+    """Check only whether a TCP listener accepts connections on port 6653."""
     try:
         s = socket.create_connection(("127.0.0.1", 6653), timeout=0.5)
         s.close()
-        return {"running": True, "address": "127.0.0.1:6653", "protocol": "OpenFlow 1.3"}
+        return {"tcp_listener_reachable": True, "address": "127.0.0.1:6653",
+                "status": "TCP_LISTENER_REACHABLE", "session_verified": False}
     except Exception:
-        return {"running": False, "address": "127.0.0.1:6653", "protocol": "OpenFlow 1.3"}
+        return {"tcp_listener_reachable": False, "address": "127.0.0.1:6653",
+                "status": "UNREACHABLE", "session_verified": False}
 
 
 def _detect_mode() -> str:
@@ -477,11 +479,16 @@ def _mininet_registry_ip() -> str:
     return os.environ.get("SDN_REGISTRY_IP", "10.0.0.100")
 
 
+def _active_registry_ip() -> str:
+    """Resolve the configured registry endpoint for the selected runtime."""
+    return _mininet_registry_ip() if _detect_mode() == "mininet" else "127.0.0.1"
+
+
 # ---- entry point -----------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(
         "app:app",
-        host="0.0.0.0",
+        host=os.environ.get("SDN_BACKEND_HOST", "127.0.0.1"),
         port=8000,
         reload=False,
         log_level="info",

@@ -1,13 +1,12 @@
 # Service Discovery SDN — Dynamic Network Control & Observability
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)]()
 [![OpenFlow 1.3](https://img.shields.io/badge/OpenFlow-1.3-orange.svg)]()
 ![Tests: run in the target environment](https://img.shields.io/badge/Tests-run%20locally-lightgrey.svg)
 
-A complete, end-to-end, production-grade university networking system demonstrating **dynamic UDP service discovery integrated with Software-Defined Networking (SDN)**. 
+A university networking project demonstrating **dynamic UDP service discovery integrated with Software-Defined Networking (SDN)**. The Mininet controller accepts unauthenticated service advertisements; a resulting allow flow does not verify server identity.
 
-Servers announce themselves autonomously via UDP advertisements, an embedded registry tracks live services, clients perform dynamic discovery, and an **SDN controller (OS-Ken on OpenFlow 1.3 / Open vSwitch)** enforces zero-trust service policies at the switch layer — dynamically installing line-rate `ALLOW` flows for valid servers and revoking them upon heartbeat silence or crash.
+Servers announce themselves via unauthenticated UDP advertisements, a registry tracks live services, and clients perform dynamic discovery. In Mininet mode, an **SDN controller (OS-Ken on OpenFlow 1.3 / Open vSwitch)** may install line-rate allow flows after advertisements and revoke them after heartbeat silence; this does not authenticate server identity.
 
 The system features a **real-time Web GUI dashboard** connecting to the live socket and SDN layer via WebSockets and REST APIs.
 
@@ -93,9 +92,9 @@ sequenceDiagram
 
 | Priority | Tier | OpenFlow Match | Action | Purpose & Mechanism |
 |---|---|---|---|---|
-| **300** | **ALLOW VALID SERVICE** | `udp, nw_dst=<server>, tp_dst=7000` | `output:port` | Installed dynamically when server advertises. Grants line-rate access to authorized server. |
+| **300** | **ALLOW ADVERTISED SERVICE** | `udp, nw_dst=<server>, tp_dst=7000` | `output:port` | May be installed after an unauthenticated advertisement; does not authenticate server identity. |
 | **250** | **ADVERTISEMENT SNOOP** | `udp, tp_dst=5000` | `CONTROLLER` | Intercepts all UDP advertisements; controller learns server presence and coordinates flow installation. |
-| **200** | **DEFAULT DENY** | `udp, tp_dst=7000` | `drop` | Zero-Trust policy: drops all service traffic unless an explicit priority 300 rule exists. |
+| **200** | **DEFAULT DENY** | `udp, tp_dst=7000` | `drop` | Drops service traffic unless a higher-priority allow rule matches; the advertisement that can trigger that rule is unauthenticated. |
 | **1** | **L2 FORWARDING** | `in_port, dl_dst` | `output:port` | Learned MAC forwarding for regular network traffic (ARP, ICMP ping). |
 | **0** | **TABLE MISS** | `(any)` | `CONTROLLER` | Default fallback: sends unhandled frames as PacketIn to SDN Controller. |
 
@@ -147,7 +146,7 @@ sequenceDiagram
 ## Requirements & Setup
 
 ### Environment
-* **OS**: Ubuntu Linux 20.04/22.04 LTS (recommended for Mininet + OVS) or macOS (standalone mode)
+* **OS**: Ubuntu Linux 20.04/22.04 LTS for Mininet + OVS. Standalone mode uses Bash; Windows users need WSL with Bash and Python. macOS supports standalone mode where dependencies are available.
 * **Python**: 3.10+
 * **Mininet & Open vSwitch**: (for full SDN topology mode)
 
@@ -173,7 +172,7 @@ python3 -m venv .venv
 
 ## Running the Application
 
-### Mode A: Full Mininet + SDN + Web GUI (Linux/Ubuntu)
+### Mode A: Mininet/OVS CLI Demo (Linux/Ubuntu)
 
 Open three terminal windows in the project directory:
 
@@ -189,20 +188,22 @@ bash start_network.sh
 ```
 *Builds topology, connects `sw1` to controller, and starts registry and servers inside hosts.*
 
-#### Terminal 3 — Start Web GUI & Backend
+#### Optional Terminal 3 — Start the GUI in Mininet registry mode
 ```bash
 SDN_MODE=mininet SDN_REGISTRY_IP=10.0.0.100 bash start.sh
 ```
-*Opens web server at `http://localhost:8000` without starting a duplicate host registry. The backend host must be able to reach the Mininet `reg` namespace over UDP; otherwise use the Mininet CLI directly for discovery and service calls.*
+*Opens web server at `http://localhost:8000` without starting a duplicate host registry. This project does not create a host-to-Mininet namespace bridge or route. Unless you provide that connectivity separately, Mininet registry queries from this GUI are unavailable; use the Mininet CLI for discovery and service calls. The GUI does not claim Mininet end-to-end connectivity.*
 
 ---
 
-### Mode B: Standalone Web GUI & Socket System (Any OS / macOS / VM)
+### Mode B: Standalone Web GUI & Socket System (Linux/macOS; Windows via WSL)
 If running outside Mininet or evaluating the socket architecture directly:
 ```bash
 bash start.sh
 ```
 Navigate to: **`http://localhost:8000`**
+
+Launch scripts require Bash. On Windows, run them from a WSL distribution with the project and Python dependencies available there. The backend binds to `127.0.0.1` by default. Management endpoints have no authentication and are intended for local/demo use; explicitly binding to another interface with `SDN_BACKEND_HOST` requires external access controls.
 
 The backend starts the embedded `BridgedRegistry` on UDP `5000` and `5001`. You can launch servers, discover services, run robustness experiments, and benchmark latency directly through the Web GUI or CLI.
 
@@ -276,7 +277,7 @@ Navigate to the **Verification Suite** tab in the GUI and click **`RUN ALL 17 TE
 | | `NET-06` | End-to-End Service Execution | Client discovers and calls echo service on UDP 7000 |
 | **SDN** | `SDN-01` | Table-Miss Rule (Priority 0) | Rule sends unknown frames to controller |
 | | `SDN-02` | Advert Snooping (Priority 250) | Rule intercepts UDP 5000 advertisements |
-| | `SDN-03` | Default-Deny Policy (Priority 200) | Zero-trust rule drops all UDP 7000 service traffic |
+| | `SDN-03` | Default-Deny Policy (Priority 200) | Drops UDP 7000 traffic without a matching higher-priority allow flow |
 | | `SDN-04` | Dynamic ALLOW Flow (Priority 300) | Installed upon valid advertisement |
 | **Robustness** | `ROB-01` | Clean Deregistration | Server sends DEREGISTER on SIGTERM; removed immediately |
 | | `ROB-02` | Server Crash & TTL Expiration | Silence exceeding TTL triggers automated purge and flow revocation |
@@ -319,10 +320,10 @@ ROGUE SERVER (UDP 7000)  -->  NO ADVERTISEMENT  -->  DEFAULT DENY (PRIO 200)  --
 | Dimension | Static / Baseline Approach | Dynamic SDN System (This Project) | Advantage |
 |---|---|---|---|
 | **Service Discovery** | Static IP / hardcoded config | Autonomous UDP advertisements & queries | Zero pre-configuration; multi-server agility |
-| **Traffic Authorization** | Permissive subnet firewall | Zero-trust default-deny + dynamic Prio 300 ALLOW | Network opens only when server advertises |
+| **Traffic Policy** | Permissive subnet firewall | Default-deny plus dynamic Prio 300 allow after unauthenticated advertisement | Advertisement-driven policy is not authenticated authorization |
 | **Failure Handling** | Endpoint updates are manual unless another discovery mechanism is used | Registry TTL expiry and controller flow revocation (live verification required) | Automated lifecycle is implemented in the controller/registry design |
 | **Discovery Latency** | No registry query for a configured endpoint | Measured by live benchmark runs | Quantitative comparison requires equivalent trials |
-| **Rogue Defense** | Requires maintained host ACLs | Priority 200 default-deny policy (live verification required) | Authorization follows the SDN policy when Mininet is running |
+| **Rogue Defense** | Requires maintained host ACLs | Priority 200 default-deny policy (live verification required) | Packet blocking requires live Mininet/OVS verification; advertisements are unauthenticated |
 | **Operational Overhead** | O(N * M) manual configuration | O(1) self-registering autonomous nodes | Cloud-native elasticity |
 
 ---

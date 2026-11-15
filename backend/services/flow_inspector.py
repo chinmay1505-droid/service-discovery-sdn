@@ -1,7 +1,7 @@
 """SDN Flow Inspector.
 
-Reads flows directly from Open vSwitch via ovs-ofctl when available,
-or inspects active SDN policies tracked by the controller / registry bridge.
+Reads flows directly from Open vSwitch via ovs-ofctl when available.
+Registry advertisements are not evidence of authentication or installed flows.
 """
 import re
 import shutil
@@ -11,9 +11,9 @@ from typing import List, Dict, Any
 
 PRIORITY_EXPLANATIONS = {
     300: {
-        "tier": "ALLOW VALID SERVICE",
-        "purpose": "Authorized service traffic allowed to specific registered server IP/port",
-        "description": "Installed dynamically by SDN controller when a server advertises. Beats the drop rule at 200.",
+        "tier": "ALLOW ADVERTISED SERVICE",
+        "purpose": "Traffic allowed to the IP/port in an advertised service entry",
+        "description": "May be installed dynamically after an unauthenticated server advertisement. Beats the drop rule at 200; does not authenticate server identity.",
         "badge": "ALLOW",
         "type": "dynamic",
     },
@@ -27,7 +27,7 @@ PRIORITY_EXPLANATIONS = {
     200: {
         "tier": "DEFAULT DENY",
         "purpose": "All UDP port 7000 traffic DROPPED",
-        "description": "Blocks any service traffic unless specifically authorized by a priority 300 rule (Zero Trust).",
+        "description": "Drops UDP service traffic that does not match a higher-priority allow flow.",
         "badge": "DROP",
         "type": "security",
     },

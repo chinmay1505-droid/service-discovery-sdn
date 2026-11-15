@@ -54,20 +54,20 @@ def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: D
     # 1. Switch
     nodes.append({
         **SWITCH_NODE,
-        "status": "ONLINE" if controller_status.get("running") else "ACTIVE",
+        "status": "UNVERIFIED",
     })
 
     # 2. Controller
     nodes.append({
         **CONTROLLER_NODE,
-        "status": "ONLINE" if controller_status.get("running") else "OFFLINE",
+        "status": "TCP_LISTENER_REACHABLE" if controller_status.get("tcp_listener_reachable") else "UNREACHABLE",
     })
     links.append({
         "source": "c0",
         "target": "sw1",
         "type": "control",
         "protocol": "OpenFlow 1.3",
-        "status": "ACTIVE" if controller_status.get("running") else "DOWN",
+        "status": "UNVERIFIED",
     })
 
     # 3. Registry
@@ -146,6 +146,7 @@ def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: D
             "total_nodes": len(nodes),
             "total_links": len(links),
             "active_servers": len(active_names),
-            "controller_online": controller_status.get("running", False),
+            "controller_tcp_listener_reachable": controller_status.get("tcp_listener_reachable", False),
+            "controller_online": controller_status.get("tcp_listener_reachable", False),
         },
     }

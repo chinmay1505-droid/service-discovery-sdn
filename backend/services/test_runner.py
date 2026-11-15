@@ -9,6 +9,7 @@ Validates the complete Service Discovery SDN system across 4 distinct domains:
 import os
 import socket
 import time
+import uuid
 from typing import Dict, Any, List
 
 from common import REGISTRY_ADVERT_PORT, REGISTRY_QUERY_PORT, SERVICE_PORT, encode
@@ -42,6 +43,34 @@ def run_all_tests(registry_ip: str = "127.0.0.1") -> Dict[str, Any]:
             "passed": passed,
             "status": status,
         })
+
+    def wait_for_registered_server(name: str, service: str, wait_s: float = 3.0):
+        """Return (registry_reachable, server_found, last_reply)."""
+        deadline = time.monotonic() + wait_s
+        registry_reachable = False
+        last_reply = {"ok": False, "servers": [], "error": "no registry response"}
+        while time.monotonic() < deadline:
+            last_reply = run_discover(registry_ip, service, timeout=0.3, retries=1)
+            if last_reply.get("ok"):
+                registry_reachable = True
+                if any(s.get("name") == name for s in last_reply.get("servers", [])):
+                    return True, True, last_reply
+            time.sleep(0.2)
+        return registry_reachable, False, last_reply
+
+    def wait_for_server_absence(name: str, service: str, wait_s: float = 2.0):
+        """Return (registry_reachable, server_absent, last_reply)."""
+        deadline = time.monotonic() + wait_s
+        registry_reachable = False
+        last_reply = {"ok": False, "servers": [], "error": "no registry response"}
+        while time.monotonic() < deadline:
+            last_reply = run_discover(registry_ip, service, timeout=0.3, retries=1)
+            if last_reply.get("ok"):
+                registry_reachable = True
+                if not any(s.get("name") == name for s in last_reply.get("servers", [])):
+                    return True, True, last_reply
+            time.sleep(0.2)
+        return registry_reachable, False, last_reply
 
     # =========================================================================
     # DOMAIN 1: NETWORKING (Low-Level Sockets & Protocol)
@@ -154,38 +183,90 @@ def run_all_tests(registry_ip: str = "127.0.0.1") -> Dict[str, Any]:
     # DOMAIN 3: ROBUSTNESS & FAILURE HANDLING
     # =========================================================================
 
-    # T11: Clean Server Deregistration
-    process_manager.stop_server("test-srv1", hard=False)
-    time.sleep(1.0)
-    disc_after_stop = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
-    t11_ok = "test-srv1" not in [s["name"] for s in disc_after_stop.get("servers", [])]
-    add_test("ROB-01", "Robustness", "Clean Deregistration (SIGTERM)", t11_ok,
-             "Server sends DEREGISTER on shutdown; registry removes entry immediately",
-             f"Server removed: {t11_ok}")
+    # T11: Clean Server Deregistration. Require a real registration before stop.
+    clean_id = uuid.uuid4().hex
+    clean_name = f"rob01-{clean_id}"
+    clean_service = f"rob01-{clean_id}"
+    start_clean = process_manager.start_server(clean_name, clean_service, registry_ip=registry_ip,
+                                               port=7000, interval=1.0, ttl=5.0)
+    reg_reachable, registered, pre_stop = wait_for_registered_server(clean_name, clean_service) if start_clean.get("ok") else (False, False, start_clean)
+    if not start_clean.get("ok"):
+        t11_status, t11_detail = False, f"Server did not start: {start_clean.get('error')}"
+    elif not reg_reachable:
+        process_manager.stop_server(clean_name, hard=True)
+        t11_status, t11_detail = None, f"Skipped: registry query unavailable before deregistration: {pre_stop.get('error')}"
+    elif not registered:
+        process_manager.stop_server(clean_name, hard=True)
+        t11_status, t11_detail = False, "Server started but was not discoverable before stop"
+    else:
+        stop_clean = process_manager.stop_server(clean_name, hard=False)
+        reachable_after, absent_after, post_stop = wait_for_server_absence(clean_name, clean_service) if stop_clean.get("ok") else (True, False, stop_clean)
+        if not stop_clean.get("ok"):
+            t11_status, t11_detail = False, f"Graceful stop failed: {stop_clean.get('error')}"
+        elif not reachable_after:
+            t11_status, t11_detail = None, f"Skipped: registry query unavailable after stop: {post_stop.get('error')}"
+        else:
+            t11_status = absent_after
+            t11_detail = "Server was registered before stop and absent after successful registry queries" if absent_after else "Server remained discoverable after graceful stop"
+    add_test("ROB-01", "Robustness", "Clean Deregistration (SIGTERM)", t11_status,
+             "Verify registration before SIGTERM, then verify removal from a successful registry query",
+             t11_detail)
 
-    # T12: Server Crash & TTL Silence Expiration
-    process_manager.start_server("test-crash", "chat", registry_ip=registry_ip, port=7000, interval=1.0, ttl=2.0)
-    time.sleep(1.2)  # register
-    process_manager.stop_server("test-crash", hard=True)  # SIGKILL (crash)
-    time.sleep(3.5)  # wait for 2.0s TTL and 1.0s reaper tick
-    disc_after_crash = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
-    t12_ok = "test-crash" not in [s["name"] for s in disc_after_crash.get("servers", [])]
-    add_test("ROB-02", "Robustness", "Server Crash & TTL Expiration", t12_ok,
-             "Unclean server crash detected by heartbeat silence exceeding TTL",
-             f"Crashed server expired from registry: {t12_ok}")
+    # T12: Crash and TTL expiration. Do not interpret a missing initial entry as expiry.
+    crash_id = uuid.uuid4().hex
+    crash_name = f"rob02-{crash_id}"
+    crash_service = f"rob02-{crash_id}"
+    start_crash = process_manager.start_server(crash_name, crash_service, registry_ip=registry_ip,
+                                               port=7000, interval=1.0, ttl=2.0)
+    reg_reachable, registered, pre_crash = wait_for_registered_server(crash_name, crash_service) if start_crash.get("ok") else (False, False, start_crash)
+    if not start_crash.get("ok"):
+        t12_status, t12_detail = False, f"Crash-test server did not start: {start_crash.get('error')}"
+    elif not reg_reachable:
+        process_manager.stop_server(crash_name, hard=True)
+        t12_status, t12_detail = None, f"Skipped: registry query unavailable before crash: {pre_crash.get('error')}"
+    elif not registered:
+        process_manager.stop_server(crash_name, hard=True)
+        t12_status, t12_detail = False, "Crash-test server started but was not discoverable before crash"
+    else:
+        crash_result = process_manager.stop_server(crash_name, hard=True)
+        if not crash_result.get("ok"):
+            t12_status, t12_detail = False, f"Could not inject crash: {crash_result.get('error')}"
+        else:
+            time.sleep(3.5)  # configured TTL is 2s; registry reaper checks once per second
+            reachable_after, absent_after, post_crash = wait_for_server_absence(crash_name, crash_service)
+            if not reachable_after:
+                t12_status, t12_detail = None, f"Skipped: registry query unavailable after crash: {post_crash.get('error')}"
+            else:
+                t12_status = absent_after
+                t12_detail = "Server was registered before crash and absent after TTL on successful registry queries" if absent_after else "Server remained discoverable after TTL wait"
+    add_test("ROB-02", "Robustness", "Server Crash & TTL Expiration", t12_status,
+             "Verify registration before hard crash, wait beyond TTL, then verify removal",
+             t12_detail)
 
-    # T13: Rogue Server Isolation
-    process_manager.start_server("test-rogue", "chat", registry_ip=registry_ip, port=7000, no_advertise=True)
-    time.sleep(0.5)
-    disc_rogue = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
-    t13_ok = "test-rogue" not in [s["name"] for s in disc_rogue.get("servers", [])]
-    rogue_started = any(s.get("name") == "test-rogue" and s.get("running")
-                        for s in process_manager.get_managed_servers())
-    process_manager.stop_server("test-rogue", hard=True)
-    add_test("ROB-03", "Robustness", "Unadvertised Server Not Registered",
-             t13_ok if rogue_started else None,
-             "An unadvertised server remains absent from registry; packet-drop enforcement requires live Mininet verification",
-             f"Rogue process started={rogue_started}; absent from registry={t13_ok}; SDN packet drop is not tested by this host process test")
+    # T13: Establish a working registry query before and after launching rogue host.
+    baseline = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
+    if not baseline.get("ok"):
+        t13_status, t13_detail = None, f"Skipped: baseline registry query failed: {baseline.get('error')}"
+    else:
+        rogue_start = process_manager.start_server("test-rogue", "chat", registry_ip=registry_ip,
+                                                   port=7000, no_advertise=True)
+        if not rogue_start.get("ok"):
+            t13_status, t13_detail = False, f"Rogue test process did not start: {rogue_start.get('error')}"
+        else:
+            time.sleep(0.5)
+            after_rogue = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
+            rogue_running = any(s.get("name") == "test-rogue" and s.get("running")
+                                for s in process_manager.get_managed_servers())
+            if not after_rogue.get("ok"):
+                t13_status, t13_detail = None, f"Skipped: registry query failed after rogue start: {after_rogue.get('error')}"
+            else:
+                rogue_absent = not any(s.get("name") == "test-rogue" for s in after_rogue.get("servers", []))
+                t13_status = bool(rogue_running and rogue_absent)
+                t13_detail = f"Baseline and follow-up registry queries succeeded; process running={rogue_running}; rogue absent={rogue_absent}; packet-drop enforcement requires Mininet"
+            process_manager.stop_server("test-rogue", hard=True)
+    add_test("ROB-03", "Robustness", "Unadvertised Server Not Registered", t13_status,
+             "Require successful registry queries before/after launch and verify running rogue server is absent",
+             t13_detail)
 
     # T14: Client UDP Retransmission Logic
     # Exercise the real retry loop against a local UDP port with no listener.
