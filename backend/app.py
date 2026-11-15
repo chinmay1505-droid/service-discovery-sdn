@@ -104,13 +104,16 @@ async def lifespan(app: FastAPI):
     # Give the event bus the running asyncio loop so sync threads can post to it.
     event_bus.set_loop(asyncio.get_running_loop())
 
-    # Start the embedded registry (UDP 5000 + 5001 on all interfaces).
-    _registry = BridgedRegistry(bind_ip="0.0.0.0", default_ttl=SERVICE_TTL)
-    _registry_thread = threading.Thread(target=_registry.run, daemon=True, name="registry")
-    _registry_thread.start()
+    # Mininet owns its own registry in the `reg` namespace. Do not start a
+    # second registry in the host namespace and present it as the same runtime.
+    if _detect_mode() == "standalone":
+        _registry = BridgedRegistry(bind_ip="0.0.0.0", default_ttl=SERVICE_TTL)
+        _registry_thread = threading.Thread(target=_registry.run, daemon=True, name="registry")
+        _registry_thread.start()
 
     event_bus.emit("SYSTEM", "BACKEND_STARTED", {
-        "message": "Registry embedded on UDP 5000 (adverts) / 5001 (queries)",
+        "message": ("Registry embedded on UDP 5000/5001" if _detect_mode() == "standalone"
+                    else f"Using Mininet registry at {_mininet_registry_ip()} (no host registry started)"),
         "mode": _detect_mode(),
     })
 
@@ -145,16 +148,19 @@ async def index():
 # ---- REST: status ----------------------------------------------------------
 @app.get("/api/status")
 async def api_status():
-    reg_ok = _registry is not None and _registry.running
-    server_count = 0
-    if reg_ok:
-        with _registry.lock:
-            server_count = len(_registry.table)
+    if _detect_mode() == "mininet":
+        reg_probe = client_runner.run_discover(_mininet_registry_ip(), "*", timeout=0.2, retries=1)
+        reg_ok = bool(reg_probe.get("ok"))
+        server_count = reg_probe.get("count", 0) if reg_ok else 0
+    else:
+        reg_probe = client_runner.run_discover("127.0.0.1", "*", timeout=0.2, retries=1)
+        reg_ok = bool(_registry is not None and _registry.running and reg_probe.get("ok"))
+        server_count = reg_probe.get("count", 0) if reg_ok else 0
 
     return {
         "registry": {
             "running": reg_ok,
-            "address": "0.0.0.0",
+            "address": _mininet_registry_ip() if _detect_mode() == "mininet" else "0.0.0.0",
             "advert_port": REGISTRY_ADVERT_PORT,
             "query_port": REGISTRY_QUERY_PORT,
         },
@@ -169,6 +175,12 @@ async def api_status():
 # ---- REST: registry --------------------------------------------------------
 @app.get("/api/registry")
 async def api_registry():
+    if _detect_mode() == "mininet":
+        discovery = client_runner.run_discover(_mininet_registry_ip(), "*", timeout=0.5, retries=2)
+        entries = [{**entry, "status": "ACTIVE"} for entry in discovery.get("servers", [])]
+        return {"entries": sorted(entries, key=lambda x: x.get("name", "")),
+                "count": len(entries), "available": bool(discovery.get("ok")),
+                "error": discovery.get("error"), "source": "Mininet registry UDP query"}
     if not _registry:
         return {"entries": [], "count": 0}
 
@@ -200,6 +212,16 @@ async def api_registry():
 @app.get("/api/services")
 async def api_services():
     """Summary of unique services registered and server counts."""
+    if _detect_mode() == "mininet":
+        snapshot = await api_registry()
+        services_map = {}
+        for e in snapshot["entries"]:
+            name = e.get("service", "")
+            services_map.setdefault(name, {"service": name, "servers": [], "count": 0})
+            services_map[name]["servers"].append({"name": e.get("name"), "ip": e.get("ip"), "port": e.get("port")})
+            services_map[name]["count"] += 1
+        items = sorted(services_map.values(), key=lambda x: x["service"])
+        return {"services": items, "count": len(items), "available": snapshot.get("available", False)}
     if not _registry:
         return {"services": [], "count": 0}
 
@@ -225,6 +247,10 @@ async def api_services():
 @app.get("/api/services/{service}")
 async def api_service_detail(service: str):
     """Detailed server list for a specific service name."""
+    if _detect_mode() == "mininet":
+        discovery = client_runner.run_discover(_mininet_registry_ip(), service, timeout=0.5, retries=2)
+        return {"service": service, "servers": discovery.get("servers", []),
+                "count": discovery.get("count", 0), "available": bool(discovery.get("ok"))}
     if not _registry:
         return {"service": service, "servers": [], "count": 0}
 
@@ -248,6 +274,8 @@ async def api_managed_servers():
 @app.post("/api/servers/start")
 async def api_server_start(req: ServerStartRequest):
     """Start a real service server subprocess."""
+    if _detect_mode() == "mininet":
+        raise HTTPException(status_code=409, detail="Server controls use host processes and are disabled in Mininet mode; start/stop servers through the Mininet CLI.")
     res = process_manager.start_server(
         name=req.name,
         service=req.service,
@@ -265,6 +293,8 @@ async def api_server_start(req: ServerStartRequest):
 @app.post("/api/servers/stop")
 async def api_server_stop(req: ServerStopRequest):
     """Stop or crash a service server subprocess."""
+    if _detect_mode() == "mininet":
+        raise HTTPException(status_code=409, detail="Server controls use host processes and are disabled in Mininet mode; stop servers through the Mininet CLI.")
     res = process_manager.stop_server(name=req.name, hard=req.hard)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error"))
@@ -279,7 +309,7 @@ async def api_discover(req: DiscoverRequest):
     Queries the registry on UDP 5001. If use=True and a server is discovered,
     also performs an end-to-end service call on UDP 7000.
     """
-    reg_ip = req.registry_ip
+    reg_ip = _mininet_registry_ip() if _detect_mode() == "mininet" and req.registry_ip == "127.0.0.1" else req.registry_ip
     disc_res = client_runner.run_discover(
         registry_ip=reg_ip,
         service=req.service,
@@ -325,8 +355,7 @@ async def api_connect(req: ConnectRequest):
 @app.get("/api/flows")
 async def api_flows():
     """Retrieve live OpenFlow 1.3 flow table from Open vSwitch or controller state."""
-    table = _registry.table if _registry else {}
-    return flow_inspector.get_flows(table)
+    return flow_inspector.get_flows()
 
 
 # ---- REST: topology --------------------------------------------------------
@@ -335,7 +364,18 @@ async def api_topology():
     """Retrieve live network topology graph with real-time status."""
     table = _registry.table if _registry else {}
     ctrl_status = _probe_controller()
-    return topology_service.get_topology(table, ctrl_status)
+    mode = _detect_mode()
+    if mode == "standalone":
+        registry_probe = client_runner.run_discover("127.0.0.1", "*", timeout=0.2, retries=1)
+        ctrl_status["registry_online"] = bool(registry_probe.get("ok"))
+    if mode == "mininet":
+        discovery = client_runner.run_discover(_mininet_registry_ip(), "*", timeout=0.3, retries=1)
+        ctrl_status["registry_online"] = bool(discovery.get("ok"))
+        for entry in discovery.get("servers", []):
+            table[(entry.get("ip"), int(entry.get("port", SERVICE_PORT)), entry.get("service"))] = entry
+    flow_state = flow_inspector.get_flows()
+    return topology_service.get_topology(table, ctrl_status, mode=mode,
+                                         flows_available=flow_state.get("available", False))
 
 
 # ---- REST: robustness lab --------------------------------------------------
@@ -343,14 +383,17 @@ async def api_topology():
 async def api_robustness(req: RobustnessRequest):
     """Run one of the 4 core robustness scenarios."""
     sc = req.scenario.upper()
+    reg_ip = _mininet_registry_ip() if _detect_mode() == "mininet" and req.registry_ip == "127.0.0.1" else req.registry_ip
+    if _detect_mode() == "mininet" and sc in ("A", "B", "D"):
+        raise HTTPException(status_code=409, detail="This robustness runner controls host processes and cannot inject faults inside Mininet namespaces. Run the scenario from the Mininet CLI instead.")
     if sc == "A":
-        return robustness_runner.run_scenario_a(registry_ip=req.registry_ip, server_name=req.target or "srv1")
+        return robustness_runner.run_scenario_a(registry_ip=reg_ip, server_name=req.target or "srv1")
     elif sc == "B":
-        return robustness_runner.run_scenario_b(registry_ip=req.registry_ip)
+        return robustness_runner.run_scenario_b(registry_ip=reg_ip)
     elif sc == "C":
-        return robustness_runner.run_scenario_c(registry_ip=req.registry_ip, unknown_service=req.target or "printer")
+        return robustness_runner.run_scenario_c(registry_ip=reg_ip, unknown_service=req.target or "printer")
     elif sc == "D":
-        return robustness_runner.run_scenario_d(registry_ip=req.registry_ip)
+        return robustness_runner.run_scenario_d(registry_ip=reg_ip)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown scenario '{req.scenario}'. Expected A, B, C, or D.")
 
@@ -359,7 +402,8 @@ async def api_robustness(req: RobustnessRequest):
 @app.post("/api/performance/run")
 async def api_performance(req: BenchmarkRequest):
     """Run real latency and throughput trials against discovery and services."""
-    return benchmark_service.run_benchmark(registry_ip=req.registry_ip, trials=req.trials)
+    reg_ip = _mininet_registry_ip() if _detect_mode() == "mininet" and req.registry_ip == "127.0.0.1" else req.registry_ip
+    return benchmark_service.run_benchmark(registry_ip=reg_ip, trials=req.trials)
 
 
 @app.get("/api/performance/baseline")
@@ -425,14 +469,12 @@ def _probe_controller() -> dict:
 
 
 def _detect_mode() -> str:
-    """Standalone (no Mininet) or mininet (Mininet available)."""
-    try:
-        import importlib.util
-        if importlib.util.find_spec("mininet") is not None:
-            return "mininet"
-    except Exception:
-        pass
-    return "standalone"
+    """Return explicitly selected runtime; package presence is not runtime state."""
+    return "mininet" if os.environ.get("SDN_MODE", "standalone").strip().lower() == "mininet" else "standalone"
+
+
+def _mininet_registry_ip() -> str:
+    return os.environ.get("SDN_REGISTRY_IP", "10.0.0.100")
 
 
 # ---- entry point -----------------------------------------------------------

@@ -7,12 +7,14 @@ Implements real executions of the 4 core robustness scenarios:
   Scenario D: UDP Retransmission & Packet Loss Handling
 """
 import socket
+import threading
 import time
 from typing import Dict, Any
 
 from services import event_bus
 from services import process_manager
 from services.client_runner import run_discover, run_connect
+from services.flow_inspector import get_flows
 
 
 def run_scenario_a(registry_ip: str = "127.0.0.1", server_name: str = "srv1") -> Dict[str, Any]:
@@ -30,18 +32,25 @@ def run_scenario_a(registry_ip: str = "127.0.0.1", server_name: str = "srv1") ->
 
     res = process_manager.start_server(name=server_name, service="chat", registry_ip=registry_ip, ttl=3.0, interval=1.0)
     time.sleep(1.5)  # Wait for first advert
-    steps[0]["status"] = "PASS"
-    steps[0]["detail"] = f"Server '{server_name}' active and advertising with short TTL (3.0s)"
+    before = run_discover(registry_ip, "chat", timeout=0.4, retries=2)
+    registered = res.get("ok") and any(s.get("name") == server_name for s in before.get("servers", []))
+    steps[0]["status"] = "PASS" if registered else "FAIL"
+    steps[0]["detail"] = f"Start result={res.get('ok')}; advertised entry observed={bool(registered)}"
 
     # Step 2: Test service before crash
     steps.append({"step": 2, "title": "Verify Service Reachability", "status": "IN_PROGRESS"})
-    conn1 = run_connect(ip=registry_ip, port=7000, message="pre-crash-check", timeout=1.0)
+    endpoint = next((s for s in before.get("servers", []) if s.get("name") == server_name), None)
+    conn1 = run_connect(ip=endpoint["ip"], port=int(endpoint["port"]), message="pre-crash-check", timeout=1.0) if endpoint else {"ok": False}
     if conn1.get("ok"):
         steps[1]["status"] = "PASS"
         steps[1]["detail"] = f"Service responded: '{conn1.get('reply')}'"
     else:
-        steps[1]["status"] = "PASS"
-        steps[1]["detail"] = "Server running; proceeding to crash injection"
+        steps[1]["status"] = "FAIL"
+        steps[1]["detail"] = "Pre-crash UDP service call failed; crash lifecycle is not established"
+
+    flows_before = get_flows()
+    before_allow = any(f.get("priority") == 300 and endpoint and endpoint["ip"] in f.get("match", "")
+                       for f in flows_before.get("flows", []))
 
     # Step 3: Hard kill the server (SIGKILL, no DEREGISTER sent)
     steps.append({"step": 3, "title": "Simulate Server Crash", "status": "IN_PROGRESS"})
@@ -50,22 +59,34 @@ def run_scenario_a(registry_ip: str = "127.0.0.1", server_name: str = "srv1") ->
         "server": server_name,
         "mode": "SIGKILL (unclean crash, no DEREGISTER)",
     })
-    steps[2]["status"] = "PASS"
-    steps[2]["detail"] = f"Injected hard crash via SIGKILL: {kill_res.get('message')}"
+    steps[2]["status"] = "PASS" if kill_res.get("ok") else "FAIL"
+    steps[2]["detail"] = f"Hard-stop result={kill_res.get('ok')}: {kill_res.get('message', kill_res.get('error'))}"
 
     # Step 4: Wait for TTL expiry
     steps.append({"step": 4, "title": "Heartbeat Silence & TTL Expiry", "status": "IN_PROGRESS"})
     time.sleep(3.5)  # Wait for 3.0s TTL to expire in registry reaper
-    steps[3]["status"] = "PASS"
-    steps[3]["detail"] = "Heartbeat silence exceeded TTL (3s); registry reaper purged entry"
+    steps[3]["status"] = "IN_PROGRESS"
+    steps[3]["detail"] = "Waiting for and checking actual registry TTL expiry"
 
     # Step 5: Verify service is no longer in registry
     steps.append({"step": 5, "title": "Verify Registry Removal & Traffic Block", "status": "IN_PROGRESS"})
     disc = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
     found_names = [s["name"] for s in disc.get("servers", [])]
     is_gone = server_name not in found_names
-    steps[4]["status"] = "PASS" if is_gone else "WARN"
+    steps[3]["status"] = "PASS" if is_gone else "FAIL"
+    steps[4]["status"] = "PASS" if is_gone else "FAIL"
     steps[4]["detail"] = f"Discovered servers: {found_names}. '{server_name}' successfully removed."
+    flows_after = get_flows()
+    if flows_before.get("available") and flows_after.get("available"):
+        after_allow = any(f.get("priority") == 300 and endpoint and endpoint["ip"] in f.get("match", "")
+                          for f in flows_after.get("flows", []))
+        flow_status = "PASS" if before_allow and not after_allow else "FAIL"
+        flow_detail = f"Actual OpenFlow ALLOW before={before_allow}, after={after_allow}"
+    else:
+        flow_status = "SKIPPED"
+        flow_detail = "Live ovs-ofctl unavailable; flow revocation was not verified"
+    steps.append({"step": 6, "title": "Verify OpenFlow ALLOW Removal", "status": flow_status,
+                  "detail": flow_detail})
 
     event_bus.emit("ROBUSTNESS", "SCENARIO_A_COMPLETED", {
         "server": server_name,
@@ -76,7 +97,7 @@ def run_scenario_a(registry_ip: str = "127.0.0.1", server_name: str = "srv1") ->
     return {
         "scenario": "A",
         "title": "Server Crash & TTL Expiration",
-        "ok": is_gone,
+        "ok": bool(is_gone and all(s["status"] == "PASS" for s in steps)),
         "steps": steps,
         "elapsed_s": round(time.time() - t0, 2),
     }
@@ -93,53 +114,18 @@ def run_scenario_b(registry_ip: str = "127.0.0.1") -> Dict[str, Any]:
     t0 = time.time()
     event_bus.emit("ROBUSTNESS", "SCENARIO_B_STARTED", {"target": "rogue"})
 
-    # Step 1: Start rogue server
-    steps.append({"step": 1, "title": "Start Unadvertised (Rogue) Server", "status": "IN_PROGRESS"})
-    res = process_manager.start_server(
-        name="rogue",
-        service="chat",
-        registry_ip=registry_ip,
-        port=7000,
-        no_advertise=True,
-    )
-    time.sleep(1.0)
-    steps[0]["status"] = "PASS" if res.get("ok") else "FAIL"
-    steps[0]["detail"] = "Started rogue server on UDP 7000 without advertising to registry"
-
-    # Step 2: Verify it is NOT in the registry
-    steps.append({"step": 2, "title": "Verify Registry State", "status": "IN_PROGRESS"})
-    disc = run_discover(registry_ip, "chat", timeout=0.5, retries=1)
-    names = [s["name"] for s in disc.get("servers", [])]
-    not_in_reg = "rogue" not in names
-    steps[1]["status"] = "PASS" if not_in_reg else "FAIL"
-    steps[1]["detail"] = f"Registry lookup for 'chat' returned: {names} (rogue correctly absent)"
-
-    # Step 3: Attempt direct connection to rogue server
-    steps.append({"step": 3, "title": "Attempt Unauthorized Service Call", "status": "IN_PROGRESS"})
-    # In SDN environment, Priority 200 rule drops UDP 7000 to unadvertised servers
-    event_bus.emit("SDN", "FLOW_CHECK", {
-        "target": "rogue@127.0.0.1:7000",
-        "expected_policy": "Priority 200 DEFAULT_DENY",
-    })
-    # If running with real SDN, call_service times out because packets are dropped
-    conn = run_connect(ip=registry_ip, port=7000, message="unauthorized-payload", timeout=1.0, retries=1)
-
-    steps[2]["status"] = "PASS"
-    steps[2]["detail"] = "Traffic evaluated against SDN Zero-Trust policy: default-deny enforced for unadvertised endpoints"
-
-    # Step 4: Cleanup rogue server
-    process_manager.stop_server("rogue", hard=True)
-    steps.append({"step": 4, "title": "Cleanup Rogue Server", "status": "PASS", "detail": "Rogue process terminated"})
+    steps = [{"step": 1, "title": "Verify Rogue Packet Drop", "status": "SKIPPED",
+              "detail": "This runner starts host processes and cannot place a rogue server inside a Mininet namespace. Use the Mininet topology scenario for actual packet-drop evidence."}]
 
     event_bus.emit("ROBUSTNESS", "SCENARIO_B_COMPLETED", {
         "elapsed_s": round(time.time() - t0, 2),
-        "policy": "DEFAULT_DENY_ENFORCED",
+        "policy": "NOT_VERIFIED",
     })
 
     return {
         "scenario": "B",
         "title": "Rogue Server & Default Deny",
-        "ok": not_in_reg,
+        "ok": False,
         "steps": steps,
         "elapsed_s": round(time.time() - t0, 2),
     }
@@ -192,53 +178,62 @@ def run_scenario_d(registry_ip: str = "127.0.0.1") -> Dict[str, Any]:
     event_bus.emit("ROBUSTNESS", "SCENARIO_D_STARTED", {"retries": 3})
 
     steps = [
-        {"step": 1, "title": "Generate UDP Discovery Datagram", "status": "IN_PROGRESS"},
-        {"step": 2, "title": "Simulate Packet Loss / Non-response", "status": "IN_PROGRESS"},
-        {"step": 3, "title": "Client Retransmission & Timeout Audit", "status": "IN_PROGRESS"},
+        {"step": 1, "title": "Start Local UDP Fault Receiver", "status": "IN_PROGRESS"},
+        {"step": 2, "title": "Drop Initial Datagrams", "status": "IN_PROGRESS"},
+        {"step": 3, "title": "Verify Real Client Retry and Recovery", "status": "IN_PROGRESS"},
     ]
 
-    # Query an unresponsive port to exercise client retransmission logic
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(0.2)
-    # Port 5999 has no listener
-    t_start = time.perf_counter()
-    attempts = 0
-    max_retries = 3
+    # This controlled endpoint drops the first two real datagrams and replies to
+    # the third. run_connect performs the actual retransmission loop.
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.bind(("127.0.0.1", 0))
+    receiver.settimeout(2.0)
+    target_port = receiver.getsockname()[1]
+    received = []
+    def fault_receiver():
+        try:
+            while len(received) < 3:
+                payload, peer = receiver.recvfrom(2048)
+                received.append(payload.decode("utf-8", "replace"))
+                if len(received) == 3:
+                    receiver.sendto(b"recovered-after-loss", peer)
+        except OSError:
+            pass
+        finally:
+            receiver.close()
 
-    for attempt in range(1, max_retries + 1):
-        attempts = attempt
-        event_bus.emit("CLIENT", "DISCOVERY_SENT", {
-            "service": "test-loss",
-            "attempt": attempt,
-            "of": max_retries,
-            "simulated_drop": True,
-        })
-        time.sleep(0.15)
-        if attempt < max_retries:
-            event_bus.emit("CLIENT", "DISCOVERY_RETRY", {
-                "service": "test-loss",
-                "attempt": attempt,
-                "reason": "ACK/Reply timeout — packet dropped or lost",
-            })
-
-    elapsed_ms = (time.perf_counter() - t_start) * 1000
+    worker = threading.Thread(target=fault_receiver, daemon=True)
+    worker.start()
     steps[0]["status"] = "PASS"
-    steps[0]["detail"] = "Unique request ID and UDP payload assembled"
-    steps[1]["status"] = "PASS"
-    steps[1]["detail"] = "Injected dropped packet condition (no ACK from network)"
-    steps[2]["status"] = "PASS"
-    steps[2]["detail"] = f"Client executed {attempts}/{max_retries} retransmission cycles over {round(elapsed_ms, 1)}ms before final timeout"
+    steps[0]["detail"] = f"Bound local UDP fault receiver on 127.0.0.1:{target_port}"
+    t_start = time.perf_counter()
+    result = run_connect("127.0.0.1", target_port, message="loss-probe", timeout=0.15, retries=3)
+    worker.join(timeout=1.0)
+    elapsed_ms = (time.perf_counter() - t_start) * 1000
+    actual_retries = max(0, len(received) - 1)
+    recovered = result.get("ok") and result.get("reply") == "recovered-after-loss"
+    steps[1]["status"] = "PASS" if len(received) >= 3 else "SKIPPED"
+    steps[1]["detail"] = (f"Receiver intentionally discarded datagrams 1 and 2; received {len(received)} attempts"
+                           if received else "No datagrams reached the local receiver; loopback restrictions prevent verification")
+    steps[2]["status"] = ("PASS" if recovered and result.get("attempts") == 3
+                           else ("SKIPPED" if not received else "FAIL"))
+    steps[2]["detail"] = f"Actual client attempts={result.get('attempts')}; recovery={bool(recovered)}; elapsed={round(elapsed_ms, 1)}ms"
 
     event_bus.emit("ROBUSTNESS", "SCENARIO_D_COMPLETED", {
-        "attempts": attempts,
+        "attempts": result.get("attempts", 0),
+        "received_datagrams": len(received),
+        "dropped_datagrams": min(2, len(received)),
+        "recovered": bool(recovered),
         "latency_ms": round(elapsed_ms, 2),
     })
 
     return {
         "scenario": "D",
         "title": "UDP Packet Loss & Retransmission",
-        "ok": True,
+        "ok": bool(recovered and len(received) == 3),
         "steps": steps,
-        "attempts": attempts,
+        "attempts": result.get("attempts", 0),
+        "received_datagrams": len(received),
+        "recovered": bool(recovered),
         "elapsed_s": round(time.time() - t0, 2),
     }

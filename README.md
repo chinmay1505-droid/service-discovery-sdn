@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)]()
 [![OpenFlow 1.3](https://img.shields.io/badge/OpenFlow-1.3-orange.svg)]()
-[![Tests: 17/17 PASS](https://img.shields.io/badge/Tests-17%2F17%20PASS%20(100%25)-success.svg)]()
+![Tests: run in the target environment](https://img.shields.io/badge/Tests-run%20locally-lightgrey.svg)
 
 A complete, end-to-end, production-grade university networking system demonstrating **dynamic UDP service discovery integrated with Software-Defined Networking (SDN)**. 
 
@@ -191,9 +191,9 @@ bash start_network.sh
 
 #### Terminal 3 — Start Web GUI & Backend
 ```bash
-bash start.sh
+SDN_MODE=mininet SDN_REGISTRY_IP=10.0.0.100 bash start.sh
 ```
-*Opens web server at `http://localhost:8000`.*
+*Opens web server at `http://localhost:8000` without starting a duplicate host registry. The backend host must be able to reach the Mininet `reg` namespace over UDP; otherwise use the Mininet CLI directly for discovery and service calls.*
 
 ---
 
@@ -205,6 +205,15 @@ bash start.sh
 Navigate to: **`http://localhost:8000`**
 
 The backend starts the embedded `BridgedRegistry` on UDP `5000` and `5001`. You can launch servers, discover services, run robustness experiments, and benchmark latency directly through the Web GUI or CLI.
+
+#### Explicit backend runtime selection
+
+The default `standalone` mode starts the backend-managed registry and host-managed service processes. To select the separate Mininet registry mode, start the backend with `SDN_MODE=mininet` and optionally set `SDN_REGISTRY_IP` (default `10.0.0.100`). This prevents a second host registry from starting. In Mininet mode the backend queries that registry over UDP and disables host-process server controls and host-based fault injection because they do not execute inside Mininet namespaces. The backend host must have a route to the Mininet registry; if it does not, status and discovery report the registry unavailable. Live flow evidence requires `ovs-ofctl` access to `sw1`.
+
+Example on Linux:
+```bash
+SDN_MODE=mininet SDN_REGISTRY_IP=10.0.0.100 bash start_backend.sh
+```
 
 ---
 
@@ -223,7 +232,7 @@ The Web GUI is designed as a serious **Network Operations Center (NOC) / SDN Con
    - Server process control panel: launch servers, toggle rogue mode (`--no-advertise`), and inject crashes (`SIGKILL`).
 
 3. **SDN Flow Table**:
-   - Live OpenFlow 1.3 flow table retrieved directly from Open vSwitch or controller state.
+   - OpenFlow 1.3 flow table queried directly from Open vSwitch. If OVS is unavailable, the API reports live flow state as unavailable; registry state is not presented as flow evidence.
    - Priority hierarchy explainer explaining why packets are allowed or dropped.
 
 4. **Topology**:
@@ -231,11 +240,11 @@ The Web GUI is designed as a serious **Network Operations Center (NOC) / SDN Con
    - Real-time link and node status.
 
 5. **Robustness Lab**:
-   - One-click execution and audit logging for Scenarios A, B, C, and D.
+   - Scenario results distinguish pass, fail, and skipped live-environment checks; Mininet namespace fault injection remains a CLI task.
 
 6. **Performance & Baseline**:
-   - Real multi-trial latency benchmarking (Min, Avg, Max, StdDev).
-   - Technical side-by-side comparison between Static Baseline vs Dynamic SDN.
+   - Repeated UDP discovery and service-call latency measurements with success/failure counts and percentile statistics.
+   - Timestamped raw JSON evidence. Static-versus-dynamic comparison is qualitative until equivalent static-endpoint trials are run.
 
 7. **Verification Suite**:
    - 17-point automated verification suite displaying exact test specifications and validation evidence.
@@ -271,11 +280,11 @@ Navigate to the **Verification Suite** tab in the GUI and click **`RUN ALL 17 TE
 | | `SDN-04` | Dynamic ALLOW Flow (Priority 300) | Installed upon valid advertisement |
 | **Robustness** | `ROB-01` | Clean Deregistration | Server sends DEREGISTER on SIGTERM; removed immediately |
 | | `ROB-02` | Server Crash & TTL Expiration | Silence exceeding TTL triggers automated purge and flow revocation |
-| | `ROB-03` | Rogue Server Isolation | Unadvertised server blocked by SDN default-deny |
-| | `ROB-04` | UDP Retransmission Logic | Client exercises 3 retries under packet loss conditions |
-| **API** | `API-01` | Discovery REST API | `POST /api/discover` executes real UDP socket discovery |
-| | `API-02` | Direct Connect REST API | `POST /api/connect` sends UDP datagram and measures RTT |
-| | `API-03` | Real-Time Event Bus Dispatch | Events emitted onto bus and queued for WebSocket clients |
+| | `ROB-03` | Unadvertised Server Not Registered | Process startup and registry absence; live packet drop is separate Mininet verification |
+| | `ROB-04` | UDP Retransmission Logic | Real client requests against a controlled local UDP loss receiver |
+| **API** | `API-01` | Discovery REST Endpoint | Skipped by the CLI runner; requires an ASGI HTTP client |
+| | `API-02` | Connect REST Endpoint | Skipped by the CLI runner; requires an ASGI HTTP client |
+| | `API-03` | WebSocket Event Delivery | Skipped; event-bus emission alone does not verify WebSocket delivery |
 
 ---
 
@@ -286,22 +295,22 @@ Navigate to the **Verification Suite** tab in the GUI and click **`RUN ALL 17 TE
 SERVER ACTIVE  -->  INJECT SIGKILL  -->  HEARTBEAT SILENCE  -->  REGISTRY EXPIRY  -->  SDN FLOW REVOKED
 ```
 - Injects `SIGKILL` to simulate sudden power failure (no `DEREGISTER`).
-- Registry reaper detects silence exceeding `15.0s` TTL.
-- Controller revokes Priority 300 ALLOW flow; traffic to crashed server is blocked.
+- The standalone robustness runner uses a short 3-second TTL and verifies registry disappearance.
+- Flow removal is reported as skipped unless actual `ovs-ofctl` state is available before and after the crash.
 
 ### Scenario B — Rogue Server Defense
 ```text
 ROGUE SERVER (UDP 7000)  -->  NO ADVERTISEMENT  -->  DEFAULT DENY (PRIO 200)  -->  TRAFFIC DROPPED
 ```
 - A rogue host attempts to run a service on UDP 7000 without advertising.
-- Basic ICMP ping may succeed, but service traffic is dropped at the switch.
+- The current backend runner cannot place a host process inside a Mininet namespace, so it reports packet-drop testing as skipped. Use the Mininet topology test for live switch enforcement.
 
 ### Scenario C — Unknown Service Query
-- Querying `printer` returns `count: 0, servers: []` in `< 1 ms`.
+- Querying an unregistered service should return `count: 0, servers: []`; latency is measured per run.
 
 ### Scenario D — UDP Packet Loss & Retransmission
-- Client sends discovery query with a 1.0s timeout and 3 retries.
-- Displays full retransmission timeline before terminal failure.
+- A controlled local UDP receiver drops the first two datagrams and replies to the third; the client retry loop is exercised directly.
+- Loopback restrictions are reported as skipped rather than as a successful injection.
 
 ---
 
@@ -311,9 +320,9 @@ ROGUE SERVER (UDP 7000)  -->  NO ADVERTISEMENT  -->  DEFAULT DENY (PRIO 200)  --
 |---|---|---|---|
 | **Service Discovery** | Static IP / hardcoded config | Autonomous UDP advertisements & queries | Zero pre-configuration; multi-server agility |
 | **Traffic Authorization** | Permissive subnet firewall | Zero-trust default-deny + dynamic Prio 300 ALLOW | Network opens only when server advertises |
-| **Failure Detection** | TCP keepalives (30-60s) or manual | UDP heartbeat silence (15s TTL) | Automated self-healing flow revocation |
-| **Discovery Latency** | 0.0 ms (pre-configured) | 0.3 - 0.9 ms (measured live RTT) | Sub-millisecond lookup overhead |
-| **Rogue Defense** | Vulnerable without granular host ACLs | Enforced at line-rate by OpenFlow switch | Unadvertised endpoints completely isolated |
+| **Failure Handling** | Endpoint updates are manual unless another discovery mechanism is used | Registry TTL expiry and controller flow revocation (live verification required) | Automated lifecycle is implemented in the controller/registry design |
+| **Discovery Latency** | No registry query for a configured endpoint | Measured by live benchmark runs | Quantitative comparison requires equivalent trials |
+| **Rogue Defense** | Requires maintained host ACLs | Priority 200 default-deny policy (live verification required) | Authorization follows the SDN policy when Mininet is running |
 | **Operational Overhead** | O(N * M) manual configuration | O(1) self-registering autonomous nodes | Cloud-native elasticity |
 
 ---
@@ -338,15 +347,15 @@ ROGUE SERVER (UDP 7000)  -->  NO ADVERTISEMENT  -->  DEFAULT DENY (PRIO 200)  --
 ## Rubric Mapping
 
 ### Deliverable 1 (15 Marks)
-* **Problem Understanding & Architecture (2/2)**: Documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and GUI.
-* **TCP/UDP Socket Implementation (4/4)**: Clean low-level UDP sockets (`src/client.py`, `src/registry.py`, `src/service_server.py`, `backend/services/client_runner.py`).
-* **Mininet + SDN (4/4)**: OpenFlow 1.3 OVS topology (`topo/topology.py`) + OS-Ken controller (`sdn/sdn_controller.py`).
-* **Socket-SDN Integration (3/3)**: UDP advertisements trigger OpenFlow flow installation (`PRIO_ALLOW` 300 beats `PRIO_DENY` 200).
-* **Initial Testing & Demo (2/2)**: `topo/topology.py --test` passes all 9 D1 test cases.
+* **Problem Understanding & Architecture**: Documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+* **TCP/UDP Socket Implementation**: UDP sockets are implemented in `src/client.py`, `src/registry.py`, `src/service_server.py`, and `backend/services/client_runner.py`.
+* **Mininet + SDN**: OpenFlow 1.3 OVS topology (`topo/topology.py`) and OS-Ken controller (`sdn/sdn_controller.py`); live operation requires Linux with Mininet, OVS, and OS-Ken.
+* **Socket-SDN Integration**: Controller code maps advertisements to priority 300 allow rules and deregistration/expiry to rule removal; validate with live `ovs-ofctl` output.
+* **Initial Testing & Demo**: Run the D1 suite in the documented Linux/Mininet environment and preserve its generated output as evidence.
 
 ### Deliverable 2 (25 Marks)
-* **Complete Application Functionality (4/4)**: Full end-to-end web GUI and REST API over real networking system.
-* **Dynamic SDN Functionality (6/6)**: 5-priority hierarchy, line-rate flow installation/removal, snooping, default-deny.
-* **Challenging Robustness Scenarios (4/4)**: Scenarios A (Crash/Expiry), B (Rogue Server), C (Unknown Service), D (Retransmission).
-* **Performance Evaluation & Comparison (5/5)**: Live benchmark runner + statistical analysis + 6-dimensional baseline comparison.
-* **Documentation, Final Demo & Viva (6/6)**: Complete architecture diagrams, self-contained startup scripts, 17/17 automated verification suite.
+* **Complete Application Functionality**: FastAPI endpoints and dashboard are present; verify in the selected runtime mode.
+* **Dynamic SDN Functionality**: Controller and topology implementations are present; live flow lifecycle remains an environment-dependent verification item.
+* **Challenging Robustness Scenarios**: Scenarios A–D are exposed. Scenario D injects actual local UDP packet loss and exercises client retries; other SDN-dependent scenarios require a live Mininet environment.
+* **Performance Evaluation & Comparison**: Live socket benchmark runner produces timestamped JSON; the static comparison remains qualitative.
+* **Documentation, Final Demo & Viva**: Startup scripts and instructions are provided. No 17/17 result is claimed without a run in the target environment.

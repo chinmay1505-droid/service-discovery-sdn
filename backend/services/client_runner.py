@@ -144,64 +144,106 @@ def run_connect(ip: str, port: int, message: str = "hello",
         "max_retries": retries,
     })
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
-    t0 = time.perf_counter()
-
-    for attempt in range(1, retries + 1):
-        event_bus.emit("CLIENT", "REQUEST_SENT", {
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+    except OSError as exc:
+        event_bus.emit("CLIENT", "CONNECT_FAILED", {
             "target": f"{ip}:{port}",
-            "message": message,
-            "attempt": attempt,
-            "of": retries,
+            "error": f"socket setup failed: {type(exc).__name__}: {exc}",
+            "latency_ms": 0.0,
+            "attempts": 0,
         })
-        try:
-            sock.sendto(message.encode("utf-8"), (ip, port))
-            data, _ = sock.recvfrom(MAX_DGRAM)
-            reply = data.decode("utf-8", "replace")
-            latency_ms = (time.perf_counter() - t0) * 1000
-            event_bus.emit("SERVER", "RESPONSE_RECEIVED", {
-                "from": f"{ip}:{port}",
-                "reply": reply,
-                "latency_ms": round(latency_ms, 2),
-                "attempt": attempt,
-            })
-            event_bus.emit("CLIENT", "CONNECT_SUCCESS", {
+        return {"ok": False, "ip": ip, "port": port,
+                "error": f"socket setup failed: {type(exc).__name__}: {exc}",
+                "latency_ms": 0.0, "attempts": 0}
+
+    t0 = time.perf_counter()
+    last_error = None
+    timeout_failures = 0
+    socket_failures = 0
+
+    try:
+        for attempt in range(1, retries + 1):
+            event_bus.emit("CLIENT", "REQUEST_SENT", {
                 "target": f"{ip}:{port}",
-                "reply": reply,
-                "latency_ms": round(latency_ms, 2),
-                "attempts": attempt,
-            })
-            sock.close()
-            return {
-                "ok": True,
-                "ip": ip,
-                "port": port,
-                "reply": reply,
-                "latency_ms": round(latency_ms, 2),
-                "attempts": attempt,
-            }
-        except socket.timeout:
-            event_bus.emit("CLIENT", "REQUEST_TIMEOUT", {
-                "target": f"{ip}:{port}",
+                "message": message,
                 "attempt": attempt,
                 "of": retries,
             })
+            try:
+                sock.sendto(message.encode("utf-8"), (ip, port))
+                data, _ = sock.recvfrom(MAX_DGRAM)
+                reply = data.decode("utf-8", "replace")
+                latency_ms = (time.perf_counter() - t0) * 1000
+                event_bus.emit("SERVER", "RESPONSE_RECEIVED", {
+                    "from": f"{ip}:{port}",
+                    "reply": reply,
+                    "latency_ms": round(latency_ms, 2),
+                    "attempt": attempt,
+                })
+                event_bus.emit("CLIENT", "CONNECT_SUCCESS", {
+                    "target": f"{ip}:{port}",
+                    "reply": reply,
+                    "latency_ms": round(latency_ms, 2),
+                    "attempts": attempt,
+                })
+                return {
+                    "ok": True,
+                    "ip": ip,
+                    "port": port,
+                    "reply": reply,
+                    "latency_ms": round(latency_ms, 2),
+                    "attempts": attempt,
+                    "previous_failures": timeout_failures + socket_failures,
+                }
+            except OSError as exc:
+                # UDP sockets may receive ICMP errors asynchronously. Windows
+                # exposes these as ConnectionResetError/ConnectionRefusedError;
+                # Linux may report them through other OSError subclasses.
+                # Count the failed attempt and continue using the same retry
+                # schedule on every platform.
+                last_error = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, (socket.timeout, TimeoutError)):
+                    timeout_failures += 1
+                    event_bus.emit("CLIENT", "REQUEST_TIMEOUT", {
+                        "target": f"{ip}:{port}",
+                        "attempt": attempt,
+                        "of": retries,
+                        "error": last_error,
+                    })
+                else:
+                    socket_failures += 1
+                    event_bus.emit("CLIENT", "REQUEST_FAILED", {
+                        "target": f"{ip}:{port}",
+                        "attempt": attempt,
+                        "of": retries,
+                        "error": last_error,
+                    })
+    finally:
+        sock.close()
 
     latency_ms = (time.perf_counter() - t0) * 1000
-    sock.close()
+    if last_error:
+        final_error = f"all {retries} attempts failed; last socket error: {last_error}"
+    else:
+        final_error = "all retries timed out — server unreachable or SDN DENY active"
     event_bus.emit("CLIENT", "CONNECT_FAILED", {
         "target": f"{ip}:{port}",
-        "error": "all retries timed out — server unreachable or SDN DENY active",
+        "error": final_error,
         "latency_ms": round(latency_ms, 2),
         "attempts": retries,
+        "timeout_failures": timeout_failures,
+        "socket_failures": socket_failures,
     })
     return {
         "ok": False,
         "ip": ip,
         "port": port,
-        "error": "timeout",
+        "error": final_error,
         "latency_ms": round(latency_ms, 2),
         "attempts": retries,
+        "timeout_failures": timeout_failures,
+        "socket_failures": socket_failures,
     }
 

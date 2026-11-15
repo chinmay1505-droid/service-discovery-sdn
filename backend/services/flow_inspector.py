@@ -134,115 +134,33 @@ def parse_ovs_dump(raw_text: str) -> List[Dict[str, Any]]:
     return flows
 
 
-def get_flows(registry_table: Dict[Any, Dict[str, Any]]) -> Dict[str, Any]:
-    """Retrieve flows either from OVS via ovs-ofctl or from active controller state."""
-    # Check if ovs-ofctl is available
+def get_flows(registry_table: Dict[Any, Dict[str, Any]] | None = None,
+              switch: str = "sw1") -> Dict[str, Any]:
+    """Return actual switch flows, or an explicit unavailable result.
+
+    Registry entries are application state and are not evidence that a FlowMod
+    reached Open vSwitch.  In particular, never synthesize a flow table from
+    ``registry_table`` when the live switch cannot be queried.
+    """
     ovs_bin = shutil.which("ovs-ofctl")
-    if ovs_bin:
-        try:
-            res = subprocess.run(
-                ["ovs-ofctl", "-O", "OpenFlow13", "dump-flows", "sw1"],
-                capture_output=True,
-                text=True,
-                timeout=2.0,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                parsed = parse_ovs_dump(res.stdout)
-                return {
-                    "source": "ovs-ofctl (Open vSwitch live)",
-                    "switch": "sw1",
-                    "protocol": "OpenFlow 1.3",
-                    "count": len(parsed),
-                    "flows": parsed,
-                    "raw": res.stdout,
-                }
-        except Exception:
-            pass
-
-    # Standalone or controller-tracked flow generation
-    # Synthesizes the exact OpenFlow 1.3 flow table maintained by sdn_controller.py
-    flows = []
-
-    # Priority 300: Dynamic ALLOW flows for each registered server
-    for (ip, port, service), entry in registry_table.items():
-        name = entry.get("name", "server")
-        flows.append({
-            "cookie": "0x0",
-            "duration": f"{round(time.time() - entry.get('first_seen', time.time()), 1)}s",
-            "table": "0",
-            "n_packets": entry.get("adverts", 1),
-            "n_bytes": entry.get("adverts", 1) * 64,
-            "priority": 300,
-            "match": f"udp,ipv4_dst={ip},udp_dst={port}",
-            "actions": f"output:{name}",
-            "server": name,
-            "service": service,
-            **PRIORITY_EXPLANATIONS[300],
-            "source": "controller_state",
-        })
-
-    # Priority 250: Advert snooping
-    flows.append({
-        "cookie": "0x0",
-        "duration": "active",
-        "table": "0",
-        "n_packets": sum(e.get("adverts", 0) for e in registry_table.values()),
-        "n_bytes": sum(e.get("adverts", 0) for e in registry_table.values()) * 128,
-        "priority": 250,
-        "match": "udp,udp_dst=5000",
-        "actions": "CONTROLLER:65535",
-        **PRIORITY_EXPLANATIONS[250],
-        "source": "controller_state",
-    })
-
-    # Priority 200: Default deny for service port 7000
-    flows.append({
-        "cookie": "0x0",
-        "duration": "active",
-        "table": "0",
-        "n_packets": 0,
-        "n_bytes": 0,
-        "priority": 200,
-        "match": "udp,udp_dst=7000",
-        "actions": "drop",
-        **PRIORITY_EXPLANATIONS[200],
-        "source": "controller_state",
-    })
-
-    # Priority 1: L2 MAC learning
-    flows.append({
-        "cookie": "0x0",
-        "duration": "active",
-        "table": "0",
-        "n_packets": 0,
-        "n_bytes": 0,
-        "priority": 1,
-        "match": "in_port=*,eth_dst=*",
-        "actions": "output:port (learned)",
-        **PRIORITY_EXPLANATIONS[1],
-        "source": "controller_state",
-    })
-
-    # Priority 0: Table-miss
-    flows.append({
-        "cookie": "0x0",
-        "duration": "active",
-        "table": "0",
-        "n_packets": 0,
-        "n_bytes": 0,
-        "priority": 0,
-        "match": "(any)",
-        "actions": "CONTROLLER:65535",
-        **PRIORITY_EXPLANATIONS[0],
-        "source": "controller_state",
-    })
-
-    flows.sort(key=lambda f: f["priority"], reverse=True)
-    return {
-        "source": "controller-tracked (OpenFlow 1.3 policy)",
-        "switch": "sw1",
-        "protocol": "OpenFlow 1.3",
-        "count": len(flows),
-        "flows": flows,
-        "raw": None,
-    }
+    if not ovs_bin:
+        return {"available": False, "source": None, "switch": switch,
+                "protocol": "OpenFlow 1.3", "count": 0, "flows": [], "raw": None,
+                "error": "ovs-ofctl is not installed; live OpenFlow state cannot be verified"}
+    try:
+        res = subprocess.run(
+            [ovs_bin, "-O", "OpenFlow13", "dump-flows", switch],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "source": None, "switch": switch,
+                "protocol": "OpenFlow 1.3", "count": 0, "flows": [], "raw": None,
+                "error": f"Could not query switch {switch}: {exc}"}
+    if res.returncode != 0:
+        return {"available": False, "source": None, "switch": switch,
+                "protocol": "OpenFlow 1.3", "count": 0, "flows": [], "raw": res.stdout,
+                "error": (res.stderr.strip() or f"ovs-ofctl exited with status {res.returncode}")}
+    parsed = parse_ovs_dump(res.stdout)
+    return {"available": True, "source": "ovs-ofctl (Open vSwitch live)",
+            "switch": switch, "protocol": "OpenFlow 1.3", "count": len(parsed),
+            "flows": parsed, "raw": res.stdout, "error": None}

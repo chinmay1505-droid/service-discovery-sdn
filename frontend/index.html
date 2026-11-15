@@ -963,9 +963,14 @@ nav {
             <span class="stat-val" id="perf-conn-avg">— ms</span>
           </div>
           <div class="stat-box">
-            <span class="stat-label">Failure Detection (TTL)</span>
-            <span class="stat-val">15.0 s</span>
+            <span class="stat-label">Discovery Success Rate</span>
+            <span class="stat-val" id="perf-disc-success">—</span>
           </div>
+        </div>
+        <div style="margin-top:18px;">
+          <div style="font-size:11px;color:var(--g500);margin-bottom:8px;">Per-trial latency (successful UDP operations)</div>
+          <div id="perf-trial-chart" role="img" aria-label="Per-trial benchmark latency chart" style="display:flex;align-items:flex-end;gap:4px;height:120px;border-bottom:1px solid var(--g300);padding:4px 0;"></div>
+          <div id="perf-evidence" style="font-size:11px;color:var(--g500);margin-top:6px;"></div>
         </div>
       </div>
     </div>
@@ -1487,9 +1492,16 @@ async function runBenchmark() {
       body: JSON.stringify({ trials: 10 })
     }).then(r => r.json());
 
-    document.getElementById('perf-disc-avg').textContent = `${d.discovery_latency_ms.avg} ms`;
-    document.getElementById('perf-disc-minmax').textContent = `${d.discovery_latency_ms.min} / ${d.discovery_latency_ms.max} ms`;
-    document.getElementById('perf-conn-avg').textContent = `${d.connection_latency_ms.avg || '—'} ms`;
+    document.getElementById('perf-disc-avg').textContent = `${d.discovery_latency_ms.mean ?? '—'} ms`;
+    document.getElementById('perf-disc-minmax').textContent = `${d.discovery_latency_ms.min ?? '—'} / ${d.discovery_latency_ms.max ?? '—'} ms`;
+    document.getElementById('perf-conn-avg').textContent = `${d.communication_latency_ms.mean ?? '—'} ms`;
+    document.getElementById('perf-disc-success').textContent = `${d.discovery_latency_ms.success_rate_pct}% (${d.discovery_latency_ms.count}/${d.discovery_latency_ms.attempted})`;
+    const samples = (d.trials_raw || []).map(t => t.end_to_end_latency_ms).filter(Number.isFinite);
+    const scale = Math.max(...samples, 1);
+    document.getElementById('perf-trial-chart').innerHTML = samples.length
+      ? samples.map((v, i) => `<div title="Trial ${i + 1}: ${v} ms" style="flex:1;min-width:3px;height:${Math.max(2, 100 * v / scale)}%;background:var(--blue);border-radius:3px 3px 0 0;"></div>`).join('')
+      : '<span style="font-size:12px;color:var(--g500);">No successful end-to-end samples</span>';
+    document.getElementById('perf-evidence').textContent = `Raw trials: ${d.evidence_file || 'not saved'} · End-to-end success: ${d.end_to_end_latency_ms.success_rate_pct}% (${d.end_to_end_latency_ms.count}/${d.end_to_end_latency_ms.attempted})`;
   } catch (_) {}
 }
 
@@ -1521,15 +1533,15 @@ async function runTestSuite() {
 
   try {
     const res = await fetch(`${BASE}/api/tests/run`, { method: 'POST' }).then(r => r.json());
-    badge.className = `badge ${res.passed === res.total ? 'badge-online' : 'badge-offline'}`;
-    badge.textContent = `${res.passed} / ${res.total} PASSED (${res.score_pct}%)`;
+    badge.className = `badge ${res.failed ? 'badge-offline' : (res.skipped ? 'badge-info' : 'badge-online')}`;
+    badge.textContent = `${res.passed} passed, ${res.failed} failed, ${res.skipped || 0} skipped (${res.score_pct}%)`;
 
     tbody.innerHTML = res.tests.map(t => `
       <tr>
         <td class="mono"><strong>${esc(t.id)}</strong></td>
         <td><span class="badge" style="background:#e2e8f0;">${esc(t.category)}</span></td>
         <td><strong>${esc(t.name)}</strong><br><span style="color:var(--g500);font-size:11px;">${esc(t.spec)}</span></td>
-        <td><span class="badge ${t.passed ? 'badge-online' : 'badge-offline'}">${t.passed ? 'PASS' : 'FAIL'}</span></td>
+        <td><span class="badge ${t.status === 'PASS' ? 'badge-online' : (t.status === 'SKIPPED' ? 'badge-info' : 'badge-offline')}">${esc(t.status || (t.passed ? 'PASS' : 'FAIL'))}</span></td>
         <td class="mono" style="font-size:11px;">${esc(t.detail)}</td>
       </tr>
     `).join('');

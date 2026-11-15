@@ -65,10 +65,12 @@ def main():
             reg.running = False
 
     print("\n" + "=" * 60)
-    print(f"TEST RESULTS: {res['passed']} / {res['total']} PASSED ({res['score_pct']}%)")
+    executed = res["total"] - res.get("skipped", 0)
+    print(f"TEST RESULTS: {res['passed']} passed, {res['failed']} failed, "
+          f"{res.get('skipped', 0)} skipped ({res['score_pct']}% of {executed} executed)")
     print("=" * 60)
     for t in res["tests"]:
-        badge = "PASS" if t["passed"] else "FAIL"
+        badge = t.get("status", "PASS" if t["passed"] else "FAIL")
         print(f"[{badge}] {t['id']}: {t['name']}")
         print(f"       Spec:   {t['spec']}")
         print(f"       Detail: {t['detail']}")

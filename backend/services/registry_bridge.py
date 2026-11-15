@@ -1,9 +1,9 @@
 """BridgedRegistry — Registry subclass that fires event_bus events on every mutation.
 
 Subclasses Registry by overriding:
-  register()     → emits REGISTRY/REGISTERED + SDN/ALLOW_FLOW_INSTALLED on first advert
-  deregister()   → emits REGISTRY/DEREGISTERED + SDN/ALLOW_FLOW_REMOVED on clean shutdown
-  reaper_loop()  → emits REGISTRY/EXPIRED + SDN/ALLOW_FLOW_REMOVED on TTL timeout
+  register()     → emits REGISTRY/REGISTERED + SDN/POLICY_EXPECTED on first advert
+  deregister()   → emits REGISTRY/DEREGISTERED + SDN/POLICY_WITHDRAWN on clean shutdown
+  reaper_loop()  → emits REGISTRY/EXPIRED + SDN/POLICY_WITHDRAWN on TTL timeout
   run()          → modified to respect self.running flag for clean shutdown
 
 No networking logic is changed — all UDP socket work remains in the parent class.
@@ -50,9 +50,8 @@ class BridgedRegistry(Registry):
                 "port": port,
                 "ttl": ttl,
             })
-            # The SDN controller sees this advertisement and installs an ALLOW flow.
-            # In standalone mode this event is derived from the registry action.
-            event_bus.emit("SDN", "ALLOW_FLOW_INSTALLED", {
+            # Registry state alone is not proof that a switch received a FlowMod.
+            event_bus.emit("SDN", "POLICY_EXPECTED", {
                 "name": name,
                 "service": service,
                 "ip": ip,
@@ -60,7 +59,9 @@ class BridgedRegistry(Registry):
                 "priority": 300,
                 "match": f"udp,ipv4_dst={ip},udp_dst={port}",
                 "action": f"output->{name}",
-                "reason": f"{name} advertised {service}",
+                "reason": f"{name} advertised {service}; live OpenFlow installation is not verified in standalone mode",
+                "verified": False,
+                "source": "registry state",
             })
         # Heartbeats are intentionally NOT emitted here to avoid flooding the stream.
 
@@ -83,11 +84,13 @@ class BridgedRegistry(Registry):
                 "port": key_port,
                 "reason": "clean DEREGISTER (graceful shutdown)",
             })
-            event_bus.emit("SDN", "ALLOW_FLOW_REMOVED", {
+            event_bus.emit("SDN", "POLICY_WITHDRAWN", {
                 "name": entry.get("name", "?"),
                 "ip": key_ip,
                 "port": key_port,
                 "reason": "graceful shutdown — DEREGISTER received",
+                "verified": False,
+                "source": "registry state",
             })
 
     # ------------------------------------------------------------------ reaper_loop
@@ -116,11 +119,13 @@ class BridgedRegistry(Registry):
                     "silent_for": round(now - entry.get("last_seen", now), 1),
                     "ttl": entry.get("ttl", 15),
                 })
-                event_bus.emit("SDN", "ALLOW_FLOW_REMOVED", {
+                event_bus.emit("SDN", "POLICY_WITHDRAWN", {
                     "name": entry.get("name", "?"),
                     "ip": key_ip,
                     "port": key_port,
                     "reason": f"TTL expired after {entry.get('ttl', 15):.0f}s silence",
+                    "verified": False,
+                    "source": "registry state",
                 })
 
             if expired:

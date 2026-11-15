@@ -45,8 +45,9 @@ CONTROLLER_NODE = {
 }
 
 
-def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: Dict[str, Any]) -> Dict[str, Any]:
-    """Build live topology graph reflecting current registered servers and controller."""
+def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: Dict[str, Any],
+                 mode: str = "standalone", flows_available: bool = False) -> Dict[str, Any]:
+    """Build a topology view while separating registry facts from flow evidence."""
     nodes = []
     links = []
 
@@ -70,7 +71,7 @@ def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: D
     })
 
     # 3. Registry
-    reg_online = True  # embedded registry is always running in backend
+    reg_online = bool(controller_status.get("registry_online", mode == "standalone"))
     nodes.append({
         **REGISTRY_NODE,
         "status": "ONLINE" if reg_online else "OFFLINE",
@@ -106,7 +107,8 @@ def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: D
             "service": entry.get("service", sinfo["default_service"]),
             "status": "ACTIVE" if is_active else "OFFLINE",
             "adverts": entry.get("adverts", 0),
-            "flow_status": "ALLOW_INSTALLED" if is_active else "DEFAULT_DENY",
+            "flow_status": ("LIVE_FLOW_TABLE_AVAILABLE" if flows_available and is_active
+                            else ("UNVERIFIED" if is_active else "NO_REGISTRY_ENTRY")),
         })
         links.append({
             "source": name,
@@ -134,6 +136,8 @@ def get_topology(registry_table: Dict[Any, Dict[str, Any]], controller_status: D
         })
 
     return {
+        "mode": mode,
+        "flow_state_verified": flows_available,
         "switch": "sw1",
         "controller": "c0",
         "nodes": nodes,

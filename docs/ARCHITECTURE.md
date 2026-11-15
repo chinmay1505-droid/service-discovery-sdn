@@ -64,6 +64,8 @@ In modern dynamic networks and microservice environments, clients should not req
 
 ## 3. Communication Flow & Sequence
 
+The following sequence describes the intended full Mininet/OVS runtime. Verify FlowMods with live `ovs-ofctl` output during a demonstration; standalone registry events do not prove that a switch flow was installed.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -82,7 +84,7 @@ sequenceDiagram
     Ctrl->>SW: PacketOut (forward advert to Registry)
     SW->>Reg: Forward UDP ADVERTISE
     Reg->>Reg: Update Table & Reset TTL
-    API->>GUI: WebSocket Push: REGISTRY/REGISTERED + SDN/ALLOW_FLOW_INSTALLED
+    API->>GUI: Registry state event; standalone mode marks expected SDN policy unverified
 
     GUI->>API: POST /api/discover {"service": "chat", "use": true}
     API->>Client: run_discover()
@@ -101,7 +103,7 @@ sequenceDiagram
     Reg->>Reg: Reaper thread purges srv1
     API->>GUI: WebSocket Push: REGISTRY/EXPIRED
     Ctrl->>SW: FlowMod DELETE Priority 300 ALLOW rule
-    API->>GUI: WebSocket Push: SDN/ALLOW_FLOW_REMOVED
+    API->>GUI: Registry expiry event; OpenFlow removal requires live switch inspection
 
     Client->>SW: Subsequent call to srv1:7000
     Note over SW: Priority 200 DEFAULT DENY matches!
@@ -221,11 +223,9 @@ stateDiagram-v2
 
 ### Measured Round-Trip Metrics
 
-| Operation | Min Latency | Average Latency | Max Latency | Standard Deviation |
-|---|---|---|---|---|
-| **Discovery Round-Trip (UDP :5001)** | 0.31 ms | 0.52 ms | 0.85 ms | 0.12 ms |
-| **Service Echo Round-Trip (UDP :7000)** | 0.18 ms | 0.29 ms | 0.61 ms | 0.08 ms |
-| **Failure Detection Time (Heartbeat TTL)** | 15.0 s | 15.2 s | 16.0 s | 0.35 s |
+No benchmark measurements are checked into this repository as verified results. Use the dashboard or `POST /api/performance/run` to execute repeated live UDP discovery and service-call trials. Each run saves timestamped raw JSON under `docs/evidence/benchmark-<UTC timestamp>.json`, including successes, failures, endpoint, and per-trial latency. Summary statistics include min, max, mean, median, population standard deviation, and p95. Failure detection and OpenFlow removal are not measured by this endpoint and must be recorded during a Mininet experiment.
+
+The static-versus-dynamic comparison below is qualitative. It does not claim zero-millisecond static lookup, a TCP keepalive time, or measured SDN convergence. A quantitative comparison needs a configured static endpoint and equivalent trials in the same environment.
 
 ### Technical Architectural Comparison
 
@@ -233,6 +233,6 @@ stateDiagram-v2
 |---|---|---|
 | **Configuration Model** | Manual static IP tables or DNS records | Fully autonomous self-registration |
 | **Data Plane Security** | Broad subnet allowance or static ACLs | Micro-segmented Zero-Trust default-deny |
-| **Failure Convergence** | Slow TCP timeouts (30-60s) or manual | Automated 15s heartbeat eviction and flow removal |
-| **Rogue Endpoint Handling** | Unauthorized servers can bind and receive | Line-rate drop at switch port without CPU overhead |
+| **Failure Convergence** | Endpoint updates are manual unless another mechanism is used | Registry TTL expiry and controller flow revocation (requires live Mininet/OVS verification) |
+| **Rogue Endpoint Handling** | Requires manually maintained authorization policy | Priority 200 default-deny policy (requires live Mininet/OVS verification) |
 | **Network Reconfiguration** | Requires network operator intervention | Autonomous OpenFlow FlowMod events |
